@@ -45,6 +45,7 @@ type Configuration struct {
 	EnableGamepad             bool     `json:"enableGamepad"`
 	EnableMotherboard         bool     `json:"enableMotherboard"`
 	MotherboardBiosOnExit     bool     `json:"motherboardBiosOnExit"`
+	EnableGpuRGB              bool     `json:"enableGpuRGB"`
 	MemoryRegisterOverride    []byte   `json:"memoryRegisterOverride"`
 }
 
@@ -166,6 +167,7 @@ func upgradeFile(cfg string) {
 			EnableGamepad:             true,
 			EnableMotherboard:         false,
 			MotherboardBiosOnExit:     false,
+			EnableGpuRGB:              false,
 			MemoryRegisterOverride:    make([]byte, 0),
 		}
 		saveConfigSettings(value)

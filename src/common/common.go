@@ -211,6 +211,7 @@ const (
 	ProductTypeScufEnvisionProV2W   = 605
 	ProductTypeScufDongleV2         = 606
 	ProductTypeXeneonEdge           = 995
+	ProductTypeGpuEne               = 994
 	ProductTypeMotherboard          = 996
 	ProductTypeDongle               = 997
 	ProductTypeSlipstream           = 998
