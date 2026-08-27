@@ -418,9 +418,16 @@ func Init(vendorId, productId uint16, serial, path string) *common.Device {
 	// There are 2 CCs. One has a packet size of 64 and the other has 96.
 	// This matters only for RGB operations due to packet chunking.
 	if productId == 3100 { // 0c1c
-		bufferSize = 96
+		// FIX: send the RGB payload as a single un-chunked full-size report.
+		// With bufferSize=96 the ~700-byte color payload gets split across ~8 packets using the
+		// 0x07 continuation command, and that chunked path does not work on this device/firmware
+		// (fan ports stay dark; only the pump lights). OpenRGB's working implementation sends the
+		// whole payload in one report, and the device accepts a full-size report fine.
+		// Verified on an iCUE Commander CORE (fw 1.7.142) with 4x LL120 + H115i: this two-value
+		// change alone restores correct per-port RGB for both static and animated profiles.
+		bufferSize = 1024
 		bufferSizeWrite = bufferSize + 1
-		maxBufferSizePerRequest = 93
+		maxBufferSizePerRequest = 1021
 	}
 
 	// Bootstrap
