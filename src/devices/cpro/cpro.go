@@ -1622,14 +1622,37 @@ func (d *Device) UpdateSpeedProfile(channelId int, profile string) uint8 {
 		}
 	}
 
-	// Check if actual channelId exists in the device list
-	if _, ok := d.Devices[channelId]; ok {
+	if channelId < 0 {
+		// All fans with speed control (the global speed dropdown)
+		for _, device := range d.Devices {
+			if device.HasSpeed {
+				d.Devices[device.ChannelId].Profile = profile
+			}
+		}
+	} else if _, ok := d.Devices[channelId]; ok {
 		if d.Devices[channelId].HasSpeed {
 			d.Devices[channelId].Profile = profile
 		}
 	}
 	d.saveDeviceProfile()
 	return 1
+}
+
+// GetCommonSpeedProfile returns the speed profile shared by every fan with speed control, or
+// "" when they differ. The Commander PRO page uses it to preselect the global speed dropdown.
+func (d *Device) GetCommonSpeedProfile() string {
+	shared := ""
+	for _, device := range d.Devices {
+		if !device.HasSpeed {
+			continue
+		}
+		if shared == "" {
+			shared = device.Profile
+		} else if device.Profile != shared {
+			return ""
+		}
+	}
+	return shared
 }
 
 // UpdateDeviceMetrics will update device metrics
