@@ -2970,7 +2970,7 @@ func ProcessHardwareChangeColor(r *http.Request) *Payload {
 		}
 	}
 
-	if req.HardwareLight < -1 || req.HardwareLight > 8 {
+	if req.HardwareLight < 0 || req.HardwareLight > 8 {
 		return &Payload{Message: language.GetValue("txtNonExistingHwProfile"), Code: http.StatusOK, Status: 0}
 	}
 

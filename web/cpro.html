@@ -89,21 +89,9 @@
                                         </label>
                                     </div>
 
-                                    <!-- Hardware lighting (shown at power-on, before OpenLinkHub starts) -->
-                                    <div class="settings-row">
-                                        <span class="settings-label text-ellipsis">{{ .Lang "txtHardwareLights" }}</span>
-                                        <label for="hardwareLights">
-                                            <select id="hardwareLights" class="form-select system-select compact auto-width hardwareLights" name="hardwareLights">
-                                                {{ range $key, $value := $device.HardwareModes }}
-                                                <option value="{{ $key }}" {{ if eq $key $device.GetHardwareMode }} selected {{ end }}>{{ $value }}</option>
-                                                {{ end }}
-                                            </select>
-                                        </label>
-                                    </div>
-
                                     <!-- Save hardware lighting to the controller -->
                                     <div class="settings-row">
-                                        <span class="settings-label text-ellipsis">Save to controller</span>
+                                        <span class="settings-label text-ellipsis" title="Stores the current lighting in the controller, so the fans show it at power-on before OpenLinkHub starts">Save lighting to controller</span>
                                         <label>
                                             <button class="system-button compact saveHardwareLighting" type="button">Save</button>
                                         </label>

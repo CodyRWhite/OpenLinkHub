@@ -62,7 +62,6 @@ type DeviceProfile struct {
 	ExternalHubs       map[int]*ExternalHubData
 	Labels             map[int]string
 	RgbOff             bool
-	HardwareMode       *int // hardware lighting effect committed to the controller; nil = static white
 }
 
 type TemperatureProbe struct {
@@ -108,7 +107,6 @@ type Device struct {
 	mutex                   sync.Mutex
 	deviceLock              sync.Mutex
 	RGBModes                []string
-	HardwareModes           map[int]string
 	queue                   chan map[int][]byte
 	instance                *common.Device
 }
@@ -139,32 +137,6 @@ type Devices struct {
 }
 
 var (
-	// Hardware lighting effects the controller can run on its own (before OpenLinkHub starts,
-	// or after it stops). Same LED protocol and byte layout as the Lighting Node Pro:
-	// {mode, speed, direction, random colors, 0x00, 0x00}.
-	hardwareLights = map[int][]byte{
-		0: {0x02, 0x01, 0x00, 0x01, 0x00, 0x00},
-		1: {0x01, 0x01, 0x00, 0x01, 0x00, 0x00},
-		2: {0x03, 0x01, 0x01, 0x01, 0x00, 0x00},
-		3: {0x07, 0x01, 0x00, 0x00, 0x00, 0xff},
-		4: {0x0a, 0x01, 0x00, 0x01, 0x00, 0x00},
-		5: {0x00, 0x01, 0x01, 0x01, 0x00, 0x00},
-		6: {0x09, 0x01, 0x01, 0x01, 0x00, 0x00},
-		7: {0x08, 0x01, 0x00, 0x01, 0x00, 0x00},
-		8: {0x06, 0x01, 0x01, 0x01, 0x00, 0x00},
-	}
-	hardwareModes = map[int]string{
-		-1: "Static (default)",
-		0:  "Color Pulse",
-		1:  "Color Shift",
-		2:  "Color Wave",
-		3:  "Marquee",
-		4:  "Rainbow",
-		5:  "Rainbow Wave",
-		6:  "Sequential",
-		7:  "Strobing",
-		8:  "Visor",
-	}
 	pwd                        = ""
 	cmdGetFirmware             = byte(0x02)
 	cmdInitDevice              = byte(0x03)
@@ -261,7 +233,6 @@ func Init(vendorId, productId uint16, serial, path string) *common.Device {
 			3: "100 %",
 		},
 		RGBModes:         rgbModes,
-		HardwareModes:    hardwareModes,
 		RailVoltages:     make(map[int]*RailVoltage, 3),
 		autoRefreshChan:  make(chan struct{}),
 		speedRefreshChan: make(chan struct{}),
@@ -317,15 +288,6 @@ func (d *Device) createDevice() {
 // ShutdownLed will reset LED ports and set device in 'hardware' mode
 func (d *Device) ShutdownLed(portId byte, lightChannels int) {
 	cfg := []byte{portId, 0x00, byte(lightChannels), 0x04, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff}
-	if d.DeviceProfile != nil && d.DeviceProfile.HardwareMode != nil {
-		if hardwareLight, ok := hardwareLights[*d.DeviceProfile.HardwareMode]; ok {
-			cfg = make([]byte, 9)
-			cfg[0] = portId
-			cfg[1] = 0x00
-			cfg[2] = byte(lightChannels)
-			copy(cfg[3:], hardwareLight)
-		}
-	}
 	_, err := d.transfer(cmdLedReset, []byte{portId})
 	if err != nil {
 		return
@@ -346,6 +308,204 @@ func (d *Device) ShutdownLed(portId byte, lightChannels int) {
 	if err != nil {
 		return
 	}
+}
+
+// Hardware lighting modes of the Commander PRO / Lighting Node LED protocol (0x35 config).
+const (
+	hwModeRainbowWave = 0x00
+	hwModeColorShift  = 0x01
+	hwModeColorPulse  = 0x02
+	hwModeColorWave   = 0x03
+	hwModeStatic      = 0x04
+	hwModeMarquee     = 0x07
+	hwModeSequential  = 0x09
+	hwModeRainbow     = 0x0a
+	hwSpeedMedium     = 0x01
+	hwDirForward      = 0x01
+	hwMaxEffects      = 8 // the controller keeps at most 8 effect configs (see liquidctl #154)
+)
+
+// hardwareModeFor maps an OpenLinkHub RGB profile name to the closest effect the
+// controller can run on its own.
+func hardwareModeFor(profile string) byte {
+	switch profile {
+	case "static", "off":
+		return hwModeStatic
+	case "rainbow", "pastelrainbow":
+		return hwModeRainbow
+	case "colorshift", "colorwarp", "gradient", "nebula", "watercolor":
+		return hwModeColorShift
+	case "colorpulse", "flickering", "storm":
+		return hwModeColorPulse
+	case "rain":
+		return hwModeColorWave
+	case "marquee":
+		return hwModeMarquee
+	case "sequential":
+		return hwModeSequential
+	default: // spiralrainbow, wave, rotator, circle, circleshift, spinner, rotarystack, arc, ...
+		return hwModeRainbowWave
+	}
+}
+
+// hardwareEffectConfig builds one 0x35 LED config for a run of LEDs on a port, translating
+// the RGB profile currently set on the page. Layout (as in liquidctl / OpenRGB):
+// port, start, count, mode, speed, direction, random colors, 0xff, color1 RGB, color2 RGB.
+func (d *Device) hardwareEffectConfig(portId byte, start, count int, profileName string) []byte {
+	mode := hardwareModeFor(profileName)
+	random := byte(0x01)
+	var c1, c2 rgb.Color
+
+	brightness := 1.0
+	if d.DeviceProfile != nil && d.DeviceProfile.BrightnessSlider != nil {
+		brightness = rgb.GetBrightnessValueFloat(*d.DeviceProfile.BrightnessSlider)
+	}
+
+	switch {
+	case profileName == "off" || (d.DeviceProfile != nil && d.DeviceProfile.RgbOff):
+		mode, random = hwModeStatic, 0x00 // black
+	case mode == hwModeStatic:
+		random = 0x00
+		if profile := d.GetRgbProfile("static"); profile != nil {
+			profile.StartColor.Brightness = brightness
+			c1 = *rgb.ModifyBrightness(profile.StartColor)
+		}
+	case mode != hwModeRainbow && mode != hwModeRainbowWave:
+		// Colored effects: use the profile's own colors when it has them, else random colors
+		if profile := d.GetRgbProfile(profileName); profile != nil &&
+			(rgb.Color{}) != profile.StartColor && (rgb.Color{}) != profile.EndColor {
+			random = 0x00
+			profile.StartColor.Brightness = brightness
+			profile.EndColor.Brightness = brightness
+			c1 = *rgb.ModifyBrightness(profile.StartColor)
+			c2 = *rgb.ModifyBrightness(profile.EndColor)
+		}
+	}
+
+	return []byte{
+		portId, byte(start), byte(count),
+		mode, hwSpeedMedium, hwDirForward, random, 0xff,
+		byte(c1.Red), byte(c1.Green), byte(c1.Blue),
+		byte(c2.Red), byte(c2.Green), byte(c2.Blue),
+	}
+}
+
+// hardwareEffects returns the 0x35 configs that reproduce the current configuration of one
+// port: one run per group of consecutive devices with the same RGB profile, in LED order.
+func (d *Device) hardwareEffects(portId byte) ([][]byte, int) {
+	keys := make([]int, 0)
+	for k, device := range d.Devices {
+		if device.PortId == portId && device.LedChannels > 0 {
+			keys = append(keys, k)
+		}
+	}
+	sort.Ints(keys)
+
+	var effects [][]byte
+	start, total := 0, 0
+	for i := 0; i < len(keys); {
+		profileName := d.Devices[keys[i]].RGB
+		count := 0
+		for i < len(keys) && d.Devices[keys[i]].RGB == profileName {
+			count += int(d.Devices[keys[i]].LedChannels)
+			i++
+		}
+		effects = append(effects, d.hardwareEffectConfig(portId, start, count, profileName))
+		start += count
+		total += count
+	}
+	return effects, total
+}
+
+// commitHardwareLighting stores the current configuration in the controller as hardware
+// effects, so it is what the fans show at power-on before OpenLinkHub starts. It uses the
+// documented sequence (liquidctl, OpenRGB): per port 0x37 reset, 0x34 begin, 0x38 hardware
+// mode, then 0x35 effect configs, and a final 0x33 0xff commit. The caller holds deviceLock.
+func (d *Device) commitHardwareLighting() int {
+	if d.DeviceProfile == nil {
+		return 0
+	}
+
+	type portEffects struct {
+		portId  byte
+		effects [][]byte
+		total   int
+	}
+	var ports []portEffects
+	effectCount := 0
+	for i := 0; i < len(d.DeviceProfile.ExternalHubs); i++ {
+		externalHub := d.DeviceProfile.ExternalHubs[i]
+		if externalHub == nil {
+			continue
+		}
+		effects, total := d.hardwareEffects(externalHub.PortId)
+		if total == 0 {
+			continue
+		}
+		ports = append(ports, portEffects{externalHub.PortId, effects, total})
+		effectCount += len(effects)
+	}
+
+	// Too many different profiles for the controller's effect slots: one effect per port,
+	// using the first device's profile.
+	if effectCount > hwMaxEffects {
+		for i := range ports {
+			first := ports[i].effects[0]
+			ports[i].effects = [][]byte{first}
+			ports[i].effects[0][2] = byte(ports[i].total)
+		}
+	}
+
+	for _, p := range ports {
+		if _, err := d.transfer(cmdLedReset, []byte{p.portId}); err != nil {
+			return 0
+		}
+		if _, err := d.transfer(cmdRefresh2, []byte{p.portId}); err != nil {
+			return 0
+		}
+		if _, err := d.transfer(cmdPortState, []byte{p.portId, 0x01}); err != nil {
+			return 0
+		}
+		for _, cfg := range p.effects {
+			if _, err := d.transfer(cmdWriteLedConfig, cfg); err != nil {
+				return 0
+			}
+		}
+	}
+	if len(ports) > 0 {
+		if _, err := d.transfer(cmdRefresh, []byte{0xff}); err != nil {
+			return 0
+		}
+	}
+	return len(ports)
+}
+
+// SaveHardwareLighting stores the lighting currently set on the page in the controller
+// (same as what happens on shutdown), then hands the LED ports back to software control.
+func (d *Device) SaveHardwareLighting() uint8 {
+	if d.DeviceProfile == nil || d.Exit {
+		return 0
+	}
+
+	for i := 0; i < len(d.DeviceProfile.ExternalHubs); i++ {
+		if d.activeRgb[i] != nil {
+			d.activeRgb[i].Exit <- true
+			d.activeRgb[i] = nil
+		}
+	}
+
+	d.deviceLock.Lock()
+	saved := d.commitHardwareLighting()
+	d.deviceLock.Unlock()
+
+	logger.Log(logger.Fields{"serial": d.Serial, "ports": saved}).Info("Saved current lighting to controller")
+
+	d.setColorEndpoint()
+	d.setDeviceColor(true)
+	if saved == 0 {
+		return 2
+	}
+	return 1
 }
 
 // GetRgbProfiles will return RGB profiles for a target device
@@ -380,9 +540,13 @@ func (d *Device) Stop() {
 				d.activeRgb[i].Exit <- true
 				d.activeRgb[i] = nil
 			}
-			d.ShutdownLed(externalHub.PortId, lightChannels)
 		}
 	}
+	// Leave the controller running the current configuration as a hardware effect, so the
+	// fans show it at power-on until OpenLinkHub takes over again.
+	d.deviceLock.Lock()
+	d.commitHardwareLighting()
+	d.deviceLock.Unlock()
 
 	d.timer.Stop()
 	var once sync.Once
@@ -1563,7 +1727,6 @@ func (d *Device) saveDeviceProfile() {
 			deviceProfile.Path = d.DeviceProfile.Path
 		}
 		deviceProfile.RgbOff = d.DeviceProfile.RgbOff
-		deviceProfile.HardwareMode = d.DeviceProfile.HardwareMode
 	}
 
 	// Fix profile paths if folder database/ folder is moved
@@ -1898,73 +2061,6 @@ func (d *Device) setColorEndpoint() {
 			}
 		}
 	}
-}
-
-// GetHardwareMode returns the selected hardware lighting effect, or -1 for the default.
-func (d *Device) GetHardwareMode() int {
-	if d.DeviceProfile == nil || d.DeviceProfile.HardwareMode == nil {
-		return -1
-	}
-	return *d.DeviceProfile.HardwareMode
-}
-
-// UpdateHardwareRgbProfile selects the hardware lighting effect (-1 = default static).
-// It is committed to the controller on shutdown, or right away via SaveHardwareLighting.
-func (d *Device) UpdateHardwareRgbProfile(hardwareLight int) uint8 {
-	if d.DeviceProfile == nil {
-		return 0
-	}
-	if hardwareLight == -1 {
-		d.DeviceProfile.HardwareMode = nil
-	} else if _, ok := hardwareLights[hardwareLight]; ok {
-		mode := hardwareLight
-		d.DeviceProfile.HardwareMode = &mode
-	} else {
-		return 0
-	}
-	d.saveDeviceProfile()
-	return 1
-}
-
-// SaveHardwareLighting commits the selected hardware lighting effect to the controller,
-// so it is what the fans show at power-on before OpenLinkHub starts, then hands the LED
-// ports back to software control. It sends the same command sequence as a normal shutdown.
-func (d *Device) SaveHardwareLighting() uint8 {
-	if d.DeviceProfile == nil || d.Exit {
-		return 0
-	}
-
-	for i := 0; i < len(d.DeviceProfile.ExternalHubs); i++ {
-		if d.activeRgb[i] != nil {
-			d.activeRgb[i].Exit <- true
-			d.activeRgb[i] = nil
-		}
-	}
-
-	saved := 0
-	d.deviceLock.Lock()
-	for _, externalHub := range d.DeviceProfile.ExternalHubs {
-		lightChannels := 0
-		for _, device := range d.Devices {
-			if device.PortId == externalHub.PortId {
-				lightChannels += int(device.LedChannels)
-			}
-		}
-		if lightChannels > 0 {
-			d.ShutdownLed(externalHub.PortId, lightChannels)
-			saved++
-		}
-	}
-	d.deviceLock.Unlock()
-
-	logger.Log(logger.Fields{"serial": d.Serial, "ports": saved, "hardwareMode": d.GetHardwareMode()}).Info("Saved hardware lighting to controller")
-
-	d.setColorEndpoint()
-	d.setDeviceColor(true)
-	if saved == 0 {
-		return 2
-	}
-	return 1
 }
 
 // ResetRgb will reset the current rgb mode
