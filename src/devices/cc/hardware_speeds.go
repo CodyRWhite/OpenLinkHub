@@ -35,12 +35,18 @@ const (
 	// until the stage 1 readout has been checked on real hardware.
 	hardwareSpeedSaveEnabled = false
 
+	// hardwareSpeedReadEnabled turns on the stage 1 read-only readout at startup. Off: on firmware
+	// 1.7.142 the CORE answers the documented speed-mode endpoint (60 6d) with data type 87 ab
+	// instead of 03 00, on both channel 0x00 and 0x01 (tested 2026-11-08), so the layout liquidctl
+	// documents doesn't apply here. Re-enable once a USB capture of iCUE shows the real format.
+	hardwareSpeedReadEnabled = false
+
 	// hwConfigChannel is the endpoint channel used to open, read, write and close the hardware
 	// config endpoints. liquidctl uses channel 0x00 for them; OpenLinkHub uses 0x01 for its own
 	// data reads. Which one firmware 1.7.142 expects for these endpoints is unverified. NOTE:
 	// OpenLinkHub keeps its lighting endpoint (0x22) open on channel 0x00, so every use of this
 	// channel closes the lighting endpoint, and callers must reopen it (setColorEndpoint).
-	hwConfigChannel = byte(0x00)
+	hwConfigChannel = byte(0x01)
 
 	hwFanModeFixed     = byte(0x00)
 	hwPumpMinimumDuty  = 75 // iCUE's lowest (Quiet) pump preset, per the liquidctl guide
@@ -81,6 +87,8 @@ type HardwareSpeedConfig struct {
 // open, read initial / more / final, close, then check the data type. The caller must hold
 // deviceLock and must not be in the Exit state (transfer does not read replies then).
 func (d *Device) hwReadEndpoint(endpoint, dataType []byte) ([]byte, string, error) {
+	// Close first, as OpenLinkHub's own read() does, in case the channel was left open.
+	_, _ = d.transfer([]byte{0x05, 0x01, hwConfigChannel}, nil, "hwRead")
 	if _, err := d.transfer([]byte{0x0d, hwConfigChannel}, endpoint, "hwRead"); err != nil {
 		return nil, "", err
 	}
@@ -263,6 +271,9 @@ func (d *Device) readHardwareSpeedConfig() (*HardwareSpeedConfig, error) {
 // and save a one-time baseline. It runs before the lighting endpoint is opened, so using
 // channel 0x00 cannot disturb lighting. Errors are logged and never stop init.
 func (d *Device) logHardwareSpeedConfig() {
+	if !hardwareSpeedReadEnabled {
+		return
+	}
 	d.deviceLock.Lock()
 	cfg, err := d.readHardwareSpeedConfig()
 	d.deviceLock.Unlock()
