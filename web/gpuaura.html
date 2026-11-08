@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+{{ template "head" . }}
+<body>
+<div class="container-fluid">
+    {{ $root := . }}
+    {{ $device := .Device }}
+    {{ $rgbModes := .Device.RGBModes }}
+    {{ $deviceProfile := .Device.DeviceProfile }}
+    <input type="hidden" id="deviceId" name="deviceId" value="{{ $device.Serial }}">
+    <div class="row">
+        {{ template "sidebar" . }}
+        <main class="main-content p-4">
+            {{ if .Dashboard.TemperatureBar }}
+            {{ template "temperature-bar" . }}
+            {{ end }}
+            <div class="row g-4 mb-4 align-items-start">
+                <div class="col-md-4">
+                    <div class="card system-card text-center">
+                        <div class="card-header">{{ $device.Product }}</div>
+                        <div class="card-body">
+                            <div class="settings-list">
+                                <div class="settings-row">
+                                    <span class="settings-label text-ellipsis">Controller</span>
+                                    <span class="settings-label">{{ $device.DeviceVersion }}</span>
+                                </div>
+                                <div class="settings-row">
+                                    <span class="settings-label text-ellipsis">{{ .Lang "txtBrightness" }}</span>
+                                    <div class="system-slider no-padding-top">
+                                        <label for="brightnessSlider">
+                                            <input type="range" id="brightnessSlider" name="brightnessSlider" min="0" max="100" value="{{ $deviceProfile.BrightnessSlider }}" step="1">
+                                        </label>
+                                        <div class="slider-value" id="brightnessSliderValue">{{ $deviceProfile.BrightnessSlider }} %</div>
+                                    </div>
+                                </div>
+                                {{ range $channel, $rgbDevice := $device.RgbDevices }}
+                                <div class="settings-row">
+                                    <span class="settings-label text-ellipsis">{{ $root.Lang "txtRgb" }}</span>
+                                    <label>
+                                        <select class="system-select auto-width compact rgbProfile" name="{{ $device.Serial }}">
+                                            {{ range $key, $mode := $rgbModes }}
+                                            <option value="{{ $rgbDevice.ChannelId }};{{ $mode }}" {{ if eq $mode $rgbDevice.RGB }}selected{{ end }}>{{ $mode }}</option>
+                                            {{ end }}
+                                        </select>
+                                    </label>
+                                </div>
+                                {{ end }}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+</div>
+<script src="/static/js/overview.js"></script>
+<script src="/static/js/sidebar.js"></script>
+{{ if .Dashboard.TemperatureBar }}
+<script src="/static/js/temperature-bar.js"></script>
+{{ end }}
+</body>
+</html>

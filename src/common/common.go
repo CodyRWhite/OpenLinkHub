@@ -212,6 +212,7 @@ const (
 	ProductTypeScufDongleV2         = 606
 	ProductTypeXeneonEdge           = 995
 	ProductTypeGpuEne               = 994
+	ProductTypeGpuAura              = 993
 	ProductTypeMotherboard          = 996
 	ProductTypeDongle               = 997
 	ProductTypeSlipstream           = 998

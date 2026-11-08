@@ -22,6 +22,7 @@ import (
 	"OpenLinkHub/src/devices/elite"
 	"OpenLinkHub/src/devices/glaivergb"
 	"OpenLinkHub/src/devices/glaivergbpro"
+	"OpenLinkHub/src/devices/gpuaura"
 	"OpenLinkHub/src/devices/gpuene"
 	"OpenLinkHub/src/devices/harpoonWU"
 	"OpenLinkHub/src/devices/harpoonrgbpro"
@@ -660,11 +661,20 @@ func Init() {
 		}
 	}
 
-	// GPU RGB (ENE SMBus controller, e.g. ASUS ROG STRIX LC GeForce RTX 3080 Ti)
+	// GPU RGB. Each driver only probes the NVIDIA i2c adapters of cards it supports:
+	// gpuene = ENE SMBus controller (e.g. ASUS ROG STRIX LC GeForce RTX 3080 Ti),
+	// gpuaura = first-gen ASUS Aura controller (Pascal ROG STRIX GTX 10-series).
 	if config.GetConfig().EnableGpuRGB {
+		found := false
 		if gpu := gpuene.Init(); gpu != nil {
 			devices[gpu.Serial] = gpu
-		} else {
+			found = true
+		}
+		if gpu := gpuaura.Init(); gpu != nil {
+			devices[gpu.Serial] = gpu
+			found = true
+		}
+		if !found {
 			logger.Log(logger.Fields{}).Warn("Unable to find a supported GPU RGB controller")
 		}
 	}
