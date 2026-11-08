@@ -14,6 +14,7 @@
     {{ $deviceProfile := .Device.DeviceProfile }}
     {{ $rgbModes := .Device.RGBModes }}
     {{ $commonRgb := .Device.GetCommonRgbProfile }}
+    {{ $commonSpeed := .Device.GetCommonSpeedProfile }}
     {{ $hubs := $device.DeviceProfile.ExternalHubs }}
     {{ $rgb := .Rgb }}
     <input type="hidden" id="deviceId" name="deviceId" value="{{ $device.Serial }}">
@@ -99,6 +100,22 @@
                                                 <option value="" {{ if eq $commonRgb "" }}selected{{ end }}>{{ if eq $commonRgb "" }}Mixed{{ else }}None{{ end }}</option>
                                                 {{ range $key, $mode := $rgbModes }}
                                                 <option value="{{ $mode }}" {{ if eq $mode $commonRgb }}selected{{ end }}>{{ $mode }}</option>
+                                                {{ end }}
+                                            </select>
+                                        </label>
+                                    </div>
+
+                                    <!-- Speed profile for all fans (same as the Commander CORE page) -->
+                                    <div class="settings-row">
+                                        <span class="settings-label text-ellipsis">{{ .Lang "txtSpeed" }}</span>
+                                        <label for="globalSpeedProfile">
+                                            <select id="globalSpeedProfile" class="form-select system-select compact auto-width globalTempProfile" name="globalTempProfile">
+                                                {{ if eq $commonSpeed "" }}<option value="" selected>Mixed</option>{{ end }}
+                                                {{ range $key, $pf := $temperatures }}
+                                                {{ if $pf.Hidden }}
+                                                {{ continue }}
+                                                {{ end }}
+                                                <option value="{{ $key }}" {{ if eq $commonSpeed $key }}selected {{ end }}>{{ $key }}</option>
                                                 {{ end }}
                                             </select>
                                         </label>
