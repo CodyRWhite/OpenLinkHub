@@ -2970,7 +2970,7 @@ func ProcessHardwareChangeColor(r *http.Request) *Payload {
 		}
 	}
 
-	if req.HardwareLight < 0 || req.HardwareLight > 8 {
+	if req.HardwareLight < -1 || req.HardwareLight > 8 {
 		return &Payload{Message: language.GetValue("txtNonExistingHwProfile"), Code: http.StatusOK, Status: 0}
 	}
 
@@ -2993,6 +2993,36 @@ func ProcessHardwareChangeColor(r *http.Request) *Payload {
 		}
 	}
 	return &Payload{Message: language.GetValue("txtUnableToChangeRgbProfile"), Code: http.StatusOK, Status: 0}
+}
+
+// ProcessSaveHardwareLighting will process POST request from a client to commit the selected
+// hardware lighting effect to the device, so it shows at power-on before OpenLinkHub starts
+func ProcessSaveHardwareLighting(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if devices.GetDevice(req.DeviceId) == nil {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	results := devices.CallDeviceMethod(req.DeviceId, "SaveHardwareLighting")
+	if len(results) > 0 {
+		switch results[0].Uint() {
+		case 1:
+			return &Payload{Message: "Lighting saved to the controller", Code: http.StatusOK, Status: 1}
+		case 2:
+			return &Payload{Message: "No lighting ports are configured on this controller", Code: http.StatusOK, Status: 0}
+		}
+	}
+	return &Payload{Message: "Unable to save lighting to the controller", Code: http.StatusOK, Status: 0}
 }
 
 // ProcessChangeStrip will process POST request from a client for RGB strip change
