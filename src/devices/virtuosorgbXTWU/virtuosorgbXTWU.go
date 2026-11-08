@@ -112,6 +112,7 @@ var (
 	cmdSleep                  = map[int][]byte{0: {0x01, 0x37, 0x00}, 1: {0x01, 0x0e, 0x00}}
 	cmdHeartbeat              = []byte{0x12}
 	cmdBatteryLevel           = []byte{0x02, 0x0f}
+	cmdBatteryCharge          = []byte{0x02, 0x10}
 	cmdSidetoneMode           = []byte{0x01, 0x46, 0x00}
 	cmdSidetone               = []byte{0x01, 0x47, 0x00}
 	cmdMicStatus              = []byte{0x02, 0x8e}
@@ -214,9 +215,21 @@ func Init(vendorId, productId uint16, _, path string) *common.Device {
 	d.backendListener()    // Control listener
 	d.createDevice()       // Device register
 	d.setEqualizer()       // Equalizer
+	d.updateStats()        // Stats
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Device successfully initialized")
 
 	return d.instance
+}
+
+// updateStats will update device stats
+func (d *Device) updateStats() {
+	stats.UpdateDeviceConnectionStatus(d.Serial, d.Connected)
+	batteryCharge, err := d.transfer(cmdBatteryCharge, nil)
+	if err != nil {
+		logger.Log(logger.Fields{"error": err, "serial": d.Serial}).Error("Unable to get battery charge status")
+		return
+	}
+	stats.UpdateBatteryChargeStatus(d.Serial, batteryCharge[4])
 }
 
 // configureHeadset will configure headset sidetone and active noise cancellation
@@ -814,6 +827,9 @@ func (d *Device) setHardwareMode() {
 
 // getBatterLevel will return initial battery level
 func (d *Device) getBatterLevel() {
+	if d.Exit {
+		return
+	}
 	batteryLevel, err := d.transfer(cmdBatteryLevel, nil)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to get battery level")
@@ -1151,7 +1167,11 @@ func (d *Device) setKeepAlive() {
 		for {
 			select {
 			case <-d.timerKeepAlive.C:
+				if d.Exit {
+					return
+				}
 				d.keepAlive()
+				d.getBatterLevel()
 			case <-d.keepAliveChan:
 				d.timerKeepAlive.Stop()
 				return
@@ -1642,6 +1662,9 @@ func (d *Device) notifyMuteChanged(status byte) {
 // getListenerData will listen for keyboard events and return data on success or nil on failure.
 // ReadWithTimeout is mandatory due to the nature of listening for events
 func (d *Device) getListenerData() []byte {
+	if d.listener == nil {
+		return nil
+	}
 	data := make([]byte, bufferSize)
 	n, err := d.listener.ReadWithTimeout(data, 100*time.Millisecond)
 	if err != nil || n == 0 {
@@ -1669,6 +1692,11 @@ func (d *Device) backendListener() {
 			logger.Log(logger.Fields{"error": err, "vendorId": d.VendorId}).Error("Unable to enumerate devices")
 		}
 
+		if d.listener == nil {
+			logger.Log(logger.Fields{"serial": d.Serial}).Error("Unable to open device listener")
+			return
+		}
+
 		for {
 			select {
 			default:
@@ -1683,6 +1711,7 @@ func (d *Device) backendListener() {
 
 				data := d.getListenerData()
 				if len(data) == 0 || data == nil {
+					time.Sleep(5 * time.Millisecond)
 					continue
 				}
 

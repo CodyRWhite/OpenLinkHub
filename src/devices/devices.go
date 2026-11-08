@@ -5,6 +5,7 @@ package devices
 // License: GPL-3.0 or later
 
 import (
+	"OpenLinkHub/src/appmonitor"
 	"OpenLinkHub/src/cluster"
 	"OpenLinkHub/src/common"
 	"OpenLinkHub/src/config"
@@ -20,10 +21,12 @@ import (
 	"OpenLinkHub/src/devices/darkcorergbsesongle"
 	"OpenLinkHub/src/devices/darkstarWU"
 	"OpenLinkHub/src/devices/elite"
+	"OpenLinkHub/src/devices/galleon100sd"
 	"OpenLinkHub/src/devices/glaivergb"
 	"OpenLinkHub/src/devices/glaivergbpro"
 	"OpenLinkHub/src/devices/gpuaura"
 	"OpenLinkHub/src/devices/gpuene"
+	"OpenLinkHub/src/devices/harpoonV2WU"
 	"OpenLinkHub/src/devices/harpoonWU"
 	"OpenLinkHub/src/devices/harpoonrgbpro"
 	"OpenLinkHub/src/devices/headsetdongle"
@@ -113,6 +116,7 @@ import (
 	"OpenLinkHub/src/devices/slipstream"
 	"OpenLinkHub/src/devices/slipstreamV2"
 	"OpenLinkHub/src/devices/st100"
+	"OpenLinkHub/src/devices/strafergb"
 	"OpenLinkHub/src/devices/strafergbmk2"
 	"OpenLinkHub/src/devices/vanguard96"
 	"OpenLinkHub/src/devices/vanguard96WU"
@@ -125,6 +129,7 @@ import (
 	"OpenLinkHub/src/devices/voidV2dongle"
 	"OpenLinkHub/src/devices/voidelitedongle"
 	"OpenLinkHub/src/devices/xc7"
+	"OpenLinkHub/src/devices/xeneonedge"
 	"OpenLinkHub/src/dispatcher"
 	"OpenLinkHub/src/inputmanager"
 	"OpenLinkHub/src/logger"
@@ -173,6 +178,7 @@ var (
 	expectedPermissions = []os.FileMode{os.FileMode(0600), os.FileMode(0660)}
 	vendorId            = uint16(6940)  // Corsair
 	scufVendorId        = uint16(11925) // Scuf
+	Psu                 = []uint16{7198, 7203, 7199, 7173, 7174, 7175, 7176, 7181, 7180, 7207}
 	interfaceId         = 0
 	devices             = make(map[string]*common.Device)
 	deviceList          = make(map[string]Device)
@@ -217,6 +223,24 @@ func StopDirty(deviceId string, productId uint16) {
 		uintResult := val.Uint()
 		if uint8(uintResult) == 2 { // USB only devices, remove them from the device list
 			deleteDevice(device.Serial)
+		}
+	}
+}
+
+// StopDirtyDevPath will stop the device by devPath without closing the file handles.
+func StopDirtyDevPath(devPath string) {
+	for _, v := range devices {
+		if v.DevicePath == devPath {
+			res := CallDeviceMethod(v.Serial, "StopDirty")
+			if res != nil {
+				val := res[0]
+				uintResult := val.Uint()
+				if uint8(uintResult) == 2 {
+					deleteDevice(v.Serial)
+					deleteDeviceLookup(v.DeviceLookup)
+					metrics.RemoveDevice(v.Serial)
+				}
+			}
 		}
 	}
 }
@@ -375,6 +399,13 @@ func deleteDevice(serial string) {
 	delete(devices, serial)
 }
 
+// deleteDeviceLookup will remove device deviceList lookup table
+func deleteDeviceLookup(deviceLookup string) {
+	mutex.Lock()
+	defer mutex.Unlock()
+	delete(deviceList, deviceLookup)
+}
+
 // addDevice will add device to device list
 func addDevice(device *common.Device) {
 	if device == nil {
@@ -508,6 +539,9 @@ func InitManual(productId uint16, key string) {
 				}
 			}
 
+			base := filepath.Base(info.Path)
+			p, _ := common.GetShortUSBDevPath(base)
+
 			if len(key) == 0 {
 				key = info.SerialNbr
 				if len(key) == 0 {
@@ -518,10 +552,18 @@ func InitManual(productId uint16, key string) {
 			if interfaceId == 1 || interfaceId == 3 || interfaceId == 4 {
 				key = info.Path
 			}
+
+			if slices.Contains(Psu, info.ProductID) {
+				// We can have multiple PSU devices, and none of them have serial number.
+				// Default to actual device path
+				key = p
+			}
+
 			device = Device{
 				ProductId: info.ProductID,
 				Path:      info.Path,
 				Serial:    key,
+				DevPath:   p,
 			}
 		}
 		return nil
@@ -612,6 +654,12 @@ func Init() {
 
 			if interfaceId == 1 || interfaceId == 3 || interfaceId == 4 {
 				key = info.Path
+			}
+
+			if slices.Contains(Psu, info.ProductID) {
+				// We can have multiple PSU devices, and none of them have serial number.
+				// Default to actual device path
+				key = p
 			}
 
 			deviceList[key] = Device{
@@ -718,6 +766,7 @@ func Init() {
 	}
 
 	inputmanager.SetDispatcher(Dispatch)
+	appmonitor.SetDispatcher(Dispatch)
 }
 
 // deviceRegisterMap hold map of supported devices and their initialization call
@@ -748,7 +797,7 @@ var deviceRegisterMap = map[uint16]Product{
 	3096:  {0, 0, "H100i RGB PLATINUM", elite.Init, nil},                   // H100i RGB PLATINUM
 	3097:  {0, 0, "H100i RGB PLATINUM SE", elite.Init, nil},                // H100i RGB PLATINUM SE
 	3098:  {0, 0, "LIGHTING NODE CORE", lncore.Init, nil},                  // Lighting Node CORE
-	3083:  {0, 0, "LIGHTING NODE PRO", lnpro.Init, nil},                    // Lighting Node Pro
+	3083:  {0, 65472, "LIGHTING NODE PRO", lnpro.Init, nil},                // Lighting Node Pro
 	7428:  {0, 0, "LIGHTING NODE PRO SPEC-OMEGA", lnpro.Init, nil},         // Lighting Node Pro bundled with SPEC-OMEGA RGB
 	3088:  {0, 0, "COMMANDER PRO", cpro.Init, nil},                         // Commander Pro
 	7424:  {0, 0, "COMMANDER PRO 1000D", cpro.Init, nil},                   // Obsidian 1000D Hub (Commander Pro)
@@ -774,9 +823,11 @@ var deviceRegisterMap = map[uint16]Product{
 	7127:  {1, 0, "K65 PRO MINI", k65pm.Init, nil},                         // K65 PRO MINI
 	7119:  {1, 0, "K65 RGB MINI", k65rm.Init, nil},                         // K65 RGB MINI
 	7087:  {1, 0, "K65 RGB MINI", k65rm.Init, nil},                         // K65 RGB MINI
+	7107:  {1, 0, "K65 RGB MINI", k65rm.Init, nil},                         // K65 RGB MINI
 	7094:  {1, 0, "K70 PPO MINI", k70pmWU.Init, nil},                       // K70 PPO MINI
 	7165:  {1, 0, "K70 CORE RGB", k70core.Init, nil},                       // K70 CORE RGB
 	7167:  {1, 0, "K70 CORE RGB", k70core.Init, nil},                       // K70 CORE RGB
+	11018: {1, 0, "K70 CORE RGB", k70core.Init, nil},                       // K70 CORE RGB
 	11009: {1, 0, "K70 CORE TKL", k70coretkl.Init, nil},                    // K70 CORE TKL
 	11010: {1, 0, "K70 CORE TKL", k70coretklWU.Init, nil},                  // K70 CORE TKL WIRELESS
 	11028: {1, 0, "K70 PRO TKL", k70protkl.Init, nil},                      // K70 PRO TKL WIRELESS
@@ -805,6 +856,7 @@ var deviceRegisterMap = map[uint16]Product{
 	6935:  {1, 0, "K65 RGB", k65rgb.Init, nil},                             // K65 RGB
 	6969:  {1, 0, "K65 RGB RAPIDFIRE", k65rgbRF.Init, nil},                 // K65 RGB RAPIDFIRE
 	6984:  {1, 0, "STRAFE RGB MK2", strafergbmk2.Init, nil},                // STRAFE RGB MK2
+	6944:  {1, 0, "STRAFE RGB", strafergb.Init, nil},                       // STRAFE RGB
 	11024: {1, 0, "K65 PLUS WIRELESS", k65plusWU.Init, nil},                // K65 PLUS WIRELESS USB
 	11025: {1, 0, "K65 PLUS WIRELESS", k65plusWU.Init, nil},                // K65 PLUS WIRELESS USB
 	11043: {1, 0, "K65 PLUS WIRELESS", k65plusWU.Init, nil},                // K65 PLUS WIRELESS USB
@@ -817,6 +869,7 @@ var deviceRegisterMap = map[uint16]Product{
 	7109:  {1, 0, "K100", k100.Init, nil},                                  // K100
 	7037:  {1, 0, "K100", k100.Init, nil},                                  // K100
 	11012: {1, 0, "MAKR 75", makr75WU.Init, nil},                           // MAKR 75
+	11020: {1, 0, "GALLEON 100 SD", galleon100sd.Init, nil},                // GALLEON 100 SD
 	11022: {2, 0, "VANGUARD 96 PRO", vanguard96pro.Init, nil},              // VANGUARD 96 PRO
 	11021: {2, 0, "VANGUARD 96", vanguard96.Init, nil},                     // VANGUARD 96
 	11023: {2, 0, "VANGUARD 96 WIRELESS", vanguard96WU.Init, nil},          // VANGUARD 96 WIRELESS
@@ -851,6 +904,7 @@ var deviceRegisterMap = map[uint16]Product{
 	6958:  {1, 0, "M65 PRO RGB", m65prorgb.Init, nil},                      // M65 PRO RGB Mouse
 	7029:  {1, 0, "HARPOON RGB PRO", harpoonrgbpro.Init, nil},              // HARPOON RGB PRO Gaming Mouse
 	7006:  {1, 0, "HARPOON", harpoonWU.Init, nil},                          // HARPOON Gaming Mouse
+	11054: {1, 0, "HARPOON V2", harpoonV2WU.Init, nil},                     // HARPOON Gaming Mouse
 	7004:  {1, 0, "NIGHTSWORD RGB", nightswordrgb.Init, nil},               // NIGHTSWORD RGB Gaming Mouse
 	7028:  {1, 0, "GLAIVE RGB PRO", glaivergbpro.Init, nil},                // GLAIVE RGB PRO Gaming Mouse
 	6964:  {1, 0, "GLAIVE RGB", glaivergb.Init, nil},                       // GLAIVE RGB Gaming Mouse
@@ -859,6 +913,7 @@ var deviceRegisterMap = map[uint16]Product{
 	7034:  {1, 0, "SABRE PRO CS", sabreprocs.Init, nil},                    // SABRE PRO CS
 	11048: {1, 0, "SABRE V2 PRO", sabrev2proWU.Init, nil},                  // SABRE V2 PRO
 	11049: {1, 0, "SABRE V2 PRO MG", sabrev2proWU.Init, nil},               // SABRE V2 PRO MG
+	11045: {1, 0, "SABRE V2 PRO CF", sabrev2proWU.Init, nil},               // SABRE V2 PRO CF
 	11036: {1, 0, "NIGHTSWORD V2", nightswordv2WU.Init, nil},               // NIGHTSWORD v2 WIRELESS SD
 	7090:  {1, 0, "DARKSTAR RGB WIRELESS", darkstarWU.Init, nil},           // DARKSTAR RGB WIRELESS Gaming Mouse
 	2658:  {3, 0, "VIRTUOSO RGB WIRELESS XT", virtuosorgbXTWU.Init, nil},   // VIRTUOSO RGB WIRELESS XT
@@ -874,6 +929,7 @@ var deviceRegisterMap = map[uint16]Product{
 	7013:  {1, 0, "SLIPSTREAM WIRELESS", nil, slipstream.Init},             // CORSAIR HARPOON RGB WIRELESS Dongle
 	11050: {1, 0, "SABRE V2 PRO DONGLE", nil, sabrev2prodongle.Init},       // Sabre v2 Pro Ultralight Wireless Dongle
 	11060: {1, 0, "SABRE V2 PRO DONGLE", nil, sabrev2prodongle.Init},       // SABRE v2 PRO WIRELESS MG receiver
+	11061: {1, 0, "SABRE V2 PRO DONGLE", nil, sabrev2prodongle.Init},       // SABRE v2 PRO WIRELESS CF receiver
 	7041:  {1, 0, "DARK CORE RGB PRO Gaming Dongle", nil, slipstream.Init}, // DARK CORE RGB PRO Gaming Dongle
 	10754: {4, 0, "VIRTUOSO MAX WIRELESS", nil, virtuosomaxdongle.Init},    // VIRTUOSO MAX WIRELESS
 	10755: {4, 0, "VIRTUOSO MAX WIRELESS", nil, virtuosomaxdongle.Init},    // VIRTUOSO MAX WIRELESS XBOX
@@ -887,11 +943,13 @@ var deviceRegisterMap = map[uint16]Product{
 	2626:  {3, 0, "HEADSET DONGLE", nil, headsetdongle.Init},               // Headset dongle
 	2675:  {3, 0, "HEADSET DONGLE", nil, headsetdongle.Init},               // Headset dongle
 	2641:  {3, 0, "VOID ELITE WIRELESS", nil, voidelitedongle.Init},        // Headset dongle
+	2645:  {3, 0, "VOID ELITE WIRELESS", nil, voidelitedongle.Init},        // Headset dongle (rev 0x0A55)
 	2622:  {3, 65346, "HEADSET DONGLE", nil, headsetdongle.Init},           // Headset dongle
 	2624:  {3, 65346, "HEADSET DONGLE", nil, headsetdongle.Init},           // Headset dongle
 	11015: {1, 0, "K65 PLUS WIRELESS", nil, k65plusWdongle.Init},           // K65 PLUS WIRELESS
 	2621:  {3, 65346, "VIRTUOSO SE", virtuosoSEWU.Init, nil},               // CORSAIR VIRTUOSO SE USB Gaming Headset
 	2623:  {3, 65346, "VIRTUOSO SE", virtuosoSEWU.Init, nil},               // CORSAIR VIRTUOSO SE USB Gaming Headset
+	10757: {3, 0, "VOID MAX WIRELESS V2", nil, voidV2dongle.Init},          // VOID MAX WIRELESS for XBOX Gaming Receiver
 	10760: {4, 0, "VOID WIRELESS V2", nil, voidV2dongle.Init},              // VOID WIRELESS V2
 	10770: {3, 0, "VOID MAX WIRELESS V2", nil, voidV2dongle.Init},          // VOID WIRELESS MAX V2
 	7168:  {0, 0, "CORSAIR LINK TM USB DONGLE", psudongle.Init, nil},       // CORSAIR LINK TM USB DONGLE
@@ -899,7 +957,7 @@ var deviceRegisterMap = map[uint16]Product{
 	14853: {4, 0, "SCUF ENVISION PRO V2", scufenvisionproV2WU.Init, nil},   // SCUF Envision Pro Controller V2
 	17230: {4, 0, "SCUF PC Controller Dongle", nil, scufdongle.Init},       // SCUF Gaming SCUF PC Controller Dongle
 	14856: {4, 0, "SCUF PC Controller Dongle V2", nil, scufdongleV2.Init},  // SCUF Envision Pro Wireless USB Receiver V2
-	//7437:  {0, 0, "XENEON EDGE", xeneonedge.Init, nil},                     // XENEON EDGE
+	7437:  {0, 0, "XENEON EDGE", xeneonedge.Init, nil},                     // XENEON EDGE
 }
 
 // initializeDevice will initialize a device

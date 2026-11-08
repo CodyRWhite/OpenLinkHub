@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"OpenLinkHub/src/appmonitor"
 	"github.com/sstallion/go-hid"
 )
 
@@ -143,6 +144,7 @@ var (
 	cmdWrite                  = []byte{0x06, 0x01}
 	cmdCloseEndpoint          = []byte{0x05, 0x01, 0x01}
 	cmdBatteryLevel           = []byte{0x02, 0x0f}
+	cmdBatteryCharge          = []byte{0x02, 0x10}
 	bufferSize                = 64
 	bufferSizeWrite           = bufferSize + 1
 	headerSize                = 2
@@ -230,6 +232,7 @@ func Init(vendorId, productId uint16, _, path string) *common.Device {
 			9:  "Mouse",
 			10: "Macro",
 			11: "Profile Switch",
+			23: "Global Profile",
 		},
 		InputActions:      inputmanager.GetInputActions(),
 		keyAssignmentFile: "/database/key-assignments/harpoonW.json",
@@ -262,9 +265,21 @@ func Init(vendorId, productId uint16, _, path string) *common.Device {
 	d.setupClusterController() // RGB Cluster
 	d.createDevice()           // Device register
 	d.startQueueWorker()       // Queue
+	d.updateStats()            // Stats
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Device successfully initialized")
 
 	return d.instance
+}
+
+// updateStats will update device stats
+func (d *Device) updateStats() {
+	stats.UpdateDeviceConnectionStatus(d.Serial, d.Connected)
+	batteryCharge, err := d.transfer(cmdBatteryCharge, nil, true)
+	if err != nil {
+		logger.Log(logger.Fields{"error": err, "serial": d.Serial}).Error("Unable to get battery charge status")
+		return
+	}
+	stats.UpdateBatteryChargeStatus(d.Serial, batteryCharge[3])
 }
 
 // createDevice will create new device register object
@@ -341,6 +356,7 @@ func (d *Device) StopDirty() uint8 {
 		})
 	}()
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Device stopped")
+	d.Connected = false
 	return 1
 }
 
@@ -1027,6 +1043,9 @@ func (d *Device) setHardwareMode() {
 
 // getBatterLevel will return initial battery level
 func (d *Device) getBatterLevel() {
+	if d.Exit {
+		return
+	}
 	batteryLevel, err := d.transfer(cmdBatteryLevel, nil, true)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to get battery level")
@@ -1322,6 +1341,7 @@ func (d *Device) UpdateDeviceKeyAssignment(keyIndex int, keyAssignment inputmana
 		val.ActionCommand = keyAssignment.ActionCommand
 		val.IsMacro = keyAssignment.IsMacro
 		val.OnRelease = keyAssignment.OnRelease
+		val.DeviceId = keyAssignment.DeviceId
 		d.KeyAssignment[keyIndex] = val
 		d.saveKeyAssignments()
 		d.setupKeyAssignment()
@@ -2170,6 +2190,9 @@ func (d *Device) triggerKeyAssignment(value byte) {
 			case 11:
 				d.rotateDeviceProfile()
 				break
+			case 23:
+				appmonitor.ManualApplicationProfileChange(val.DeviceId)
+				break
 			}
 		}
 	}
@@ -2271,7 +2294,11 @@ func (d *Device) setKeepAlive() {
 		for {
 			select {
 			case <-d.timerKeepAlive.C:
+				if d.Exit {
+					return
+				}
 				d.keepAlive()
+				d.getBatterLevel()
 			case <-d.keepAliveChan:
 				d.timerKeepAlive.Stop()
 				return
@@ -2327,6 +2354,7 @@ func (d *Device) startQueueWorker() {
 				dpiColor = d.getSniperColor()
 			}
 			if dpiColor == nil {
+				d.deviceLock.Unlock()
 				return
 			}
 
@@ -2559,6 +2587,9 @@ func (d *Device) transfer(endpoint, buffer []byte, read bool) ([]byte, error) {
 // getListenerData will listen for keyboard events and return data on success or nil on failure.
 // ReadWithTimeout is mandatory due to the nature of listening for events
 func (d *Device) getListenerData() []byte {
+	if d.listener == nil {
+		return nil
+	}
 	data := make([]byte, bufferSize)
 	n, err := d.listener.ReadWithTimeout(data, 100*time.Millisecond)
 	if err != nil || n == 0 {
@@ -2586,6 +2617,11 @@ func (d *Device) backendListener() {
 			logger.Log(logger.Fields{"error": err, "vendorId": d.VendorId}).Error("Unable to enumerate devices")
 		}
 
+		if d.listener == nil {
+			logger.Log(logger.Fields{"serial": d.Serial}).Error("Unable to open device listener")
+			return
+		}
+
 		for {
 			select {
 			default:
@@ -2600,6 +2636,7 @@ func (d *Device) backendListener() {
 
 				data := d.getListenerData()
 				if len(data) == 0 || data == nil {
+					time.Sleep(5 * time.Millisecond)
 					continue
 				}
 

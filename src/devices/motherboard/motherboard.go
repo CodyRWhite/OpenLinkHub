@@ -634,7 +634,14 @@ func (d *Device) getDevices() int {
 				}
 
 				if mode, ok := d.DeviceProfile.HeaderModes[i]; ok {
-					headerMode = mode
+					// Only use a saved mode the board definition knows about. Profiles saved
+					// by older versions stored remapped values (e.g. 2 for BIOS) that would
+					// otherwise be written to pwmN_enable as a different fan control mode.
+					if _, valid := mobo.Headers[i].HeaderModes[mode]; valid {
+						headerMode = mode
+					} else {
+						logger.Log(logger.Fields{"serial": d.Serial, "header": i, "mode": mode}).Warn("Ignoring saved header mode not defined for this board")
+					}
 				}
 			} else {
 				logger.Log(logger.Fields{"serial": d.Serial}).Warn("DeviceProfile is not set, probably first startup")

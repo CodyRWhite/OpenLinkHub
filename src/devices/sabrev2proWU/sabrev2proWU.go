@@ -253,9 +253,15 @@ func Init(vendorId, productId uint16, _, path string) *common.Device {
 	d.loadKeyAssignments() // Key Assignments
 	d.setupKeyAssignment() // Setup key assignments
 	d.createDevice()       // Device register
+	d.updateStats()        // Stats
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Device successfully initialized")
 
 	return d.instance
+}
+
+// updateStats will update device stats
+func (d *Device) updateStats() {
+	stats.UpdateDeviceConnectionStatus(d.Serial, d.Connected)
 }
 
 // createDevice will create new device register object
@@ -309,6 +315,7 @@ func (d *Device) StopDirty() uint8 {
 		})
 	}()
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Device stopped")
+	d.Connected = false
 	return 1
 }
 
@@ -435,6 +442,9 @@ func (d *Device) getDebugMode() {
 
 // getBatterLevel will return initial battery level
 func (d *Device) getBatterLevel() {
+	if d.Exit {
+		return
+	}
 	buf := make([]byte, 15)
 	buf[14] = 0x49
 	batteryLevel, err := d.transfer(cmdRead, buf)
@@ -713,6 +723,7 @@ func (d *Device) UpdateDeviceKeyAssignment(keyIndex int, keyAssignment inputmana
 		val.ActionType = keyAssignment.ActionType
 		val.ActionCommand = keyAssignment.ActionCommand
 		val.IsMacro = keyAssignment.IsMacro
+		val.DeviceId = keyAssignment.DeviceId
 		d.KeyAssignment[keyIndex] = val
 		d.saveKeyAssignments()
 		d.setupKeyAssignment()
@@ -1161,7 +1172,11 @@ func (d *Device) setKeepAlive() {
 		for {
 			select {
 			case <-d.timerKeepAlive.C:
+				if d.Exit {
+					return
+				}
 				d.keepAlive()
+				d.getBatterLevel()
 			case <-d.keepAliveChan:
 				d.timerKeepAlive.Stop()
 				return
@@ -1481,6 +1496,7 @@ func (d *Device) mouseListener() {
 		}
 
 		if d.mouse != nil {
+			var pressedButtons byte = 0
 			for {
 				select {
 				default:
@@ -1500,25 +1516,29 @@ func (d *Device) mouseListener() {
 
 					// Buttons
 					if ev.Type == EvKey && (ev.Code == BtnBack || ev.Code == BtnForward || ev.Code == BtnMiddle || ev.Code == BtnLeft || ev.Code == BtnRight) {
-						var val byte = 0
+						var val byte
 						switch ev.Code {
-						case 272:
+						case BtnLeft:
 							val = 1
-						case 273:
+						case BtnRight:
 							val = 2
-						case 274:
+						case BtnMiddle:
 							val = 4
-						case 275:
+						case BtnBack:
 							val = 8
-						case 276:
+						case BtnForward:
 							val = 16
 						}
 
-						if ev.Value == 1 {
-							d.triggerKeyAssignment(val)
-						} else {
-							d.triggerKeyAssignment(0)
+						switch ev.Value {
+						case 1:
+							pressedButtons |= val
+						case 0:
+							pressedButtons &^= val
+						default:
+							continue
 						}
+						d.triggerKeyAssignment(pressedButtons)
 					}
 
 					// Mouse position

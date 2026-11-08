@@ -13,6 +13,7 @@ Gerencie iluminação RGB, velocidades de ventiladores, métricas do sistema, be
 - Suporte para memória DDR4 e DDR5
 - Perfis de ventiladores personalizados, sensores de temperatura e editor RGB
 - Se precisar de menu na bandeja do sistema - https://github.com/jurkovic-nikola/openlinkhub-tray
+- XENEON EDGE App - https://github.com/jurkovic-nikola/openlinkhub-xeneon
 - [Lista de dispositivos suportados](docs/supported-devices.md)
 - [SCUF Controller Audio Config](docs/scuf-controller.md)
 - [KDE System Monitor Sensor Face](https://github.com/jurkovic-nikola/openlinkhub-sensorfaces)
@@ -75,7 +76,7 @@ $ sudo dnf install OpenLinkHub
 - usbutils
 - libpipewire-dev
 - pkg-config
-- go 1.25.0 - https://go.dev/dl/
+- go 1.26.0 - https://go.dev/dl/
 ```bash
 # Pacotes necessários (deb)
 $ sudo apt-get install libudev-dev
@@ -171,7 +172,8 @@ xdg-open http://127.0.0.1:27003
   "defaultNvidiaGPU": 0,
   "enableGamepad": true,
   "enableMotherboard": false,
-  "motherboardBiosOnExit": false
+  "motherboardBiosOnExit": false,
+  "appMonitor": false
 }
 ```
 - listenPort: Porta do servidor HTTP.
@@ -207,6 +209,7 @@ xdg-open http://127.0.0.1:27003
 - enableGamepad: Ativar ou desativar o gamepad virtual usado para controladores SCUF.
 - enableMotherboard: Habilita o controle dos conectores PWM da placa-mãe.
 - motherboardBiosOnExit: Alterna os conectores PWM para o modo BIOS quando o programa é encerrado.
+- appMonitor: Ativar ou desativar a integração de aplicativos.
 
 ### 7. Interface de Aplicativo Web Progressiva (PWA)
 A interface web suporta instalação como aplicativo web progressivo (PWA). Com um navegador suportado, isso permite que a interface apareça como um aplicativo independente.

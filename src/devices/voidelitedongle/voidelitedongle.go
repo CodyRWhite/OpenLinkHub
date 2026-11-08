@@ -32,8 +32,8 @@ type Device struct {
 	Firmware      string `json:"firmware"`
 	ProductId     uint16
 	VendorId      uint16
-	Devices       *Devices `json:"devices"`
-	SharedDevices func(device *common.Device)
+	Devices       *Devices                    `json:"devices"`
+	SharedDevices func(device *common.Device) `json:"-"`
 	PairedDevices map[uint16]any
 	SingleDevice  bool
 	Template      string
@@ -102,7 +102,7 @@ func (d *Device) createDevice() {
 // addDevices adda a mew device
 func (d *Device) addDevices() {
 	switch d.Devices.ProductId {
-	case 2641:
+	case 2641, 2645:
 		{
 			dev := voideliteW.Init(
 				d.Devices.VendorId,
@@ -303,6 +303,9 @@ func (d *Device) setDeviceStatus(status byte) {
 // getListenerData will listen for keyboard events and return data on success or nil on failure.
 // ReadWithTimeout is mandatory due to the nature of listening for events
 func (d *Device) getListenerData() []byte {
+	if d.listener == nil {
+		return nil
+	}
 	data := make([]byte, bufferSize)
 	n, err := d.listener.ReadWithTimeout(data, 100*time.Millisecond)
 	if err != nil || n == 0 {
@@ -330,6 +333,11 @@ func (d *Device) backendListener() {
 			logger.Log(logger.Fields{"error": err, "vendorId": d.VendorId}).Error("Unable to enumerate devices")
 		}
 
+		if d.listener == nil {
+			logger.Log(logger.Fields{"serial": d.Serial}).Error("Unable to open device listener")
+			return
+		}
+
 		for {
 			select {
 			default:
@@ -344,6 +352,7 @@ func (d *Device) backendListener() {
 
 				data := d.getListenerData()
 				if len(data) == 0 || data == nil {
+					time.Sleep(5 * time.Millisecond)
 					continue
 				}
 

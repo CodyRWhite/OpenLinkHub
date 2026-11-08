@@ -13,6 +13,7 @@ import (
 	"OpenLinkHub/src/keyboards"
 	"OpenLinkHub/src/logger"
 	"OpenLinkHub/src/macro"
+	"OpenLinkHub/src/openrgb"
 	"OpenLinkHub/src/rgb"
 	"OpenLinkHub/src/stats"
 	"OpenLinkHub/src/temperatures"
@@ -28,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"OpenLinkHub/src/appmonitor"
 	"github.com/sstallion/go-hid"
 )
 
@@ -58,6 +60,7 @@ type DeviceProfile struct {
 	ControlDial          int
 	ControlDialColors    map[int]*rgb.Color
 	RGBCluster           bool
+	OpenRGBIntegration   bool
 	DisableAltTab        bool
 	DisableAltF4         bool
 	DisableShiftTab      bool
@@ -68,6 +71,7 @@ type DeviceProfile struct {
 
 type Device struct {
 	Debug                  bool
+	Path                   string
 	dev                    *hid.Device
 	listener               *hid.Device
 	Manufacturer           string `json:"manufacturer"`
@@ -76,6 +80,7 @@ type Device struct {
 	Firmware               string `json:"firmware"`
 	activeRgb              *rgb.ActiveRGB
 	UserProfiles           map[string]*DeviceProfile `json:"userProfiles"`
+	ProfileOrder           []string                  `json:"profileOrder"`
 	Devices                map[int]string            `json:"devices"`
 	DeviceProfile          *DeviceProfile
 	OriginalProfile        *DeviceProfile
@@ -118,6 +123,10 @@ type Device struct {
 	stopRepeatMutex        sync.Mutex
 	Connected              bool
 	dispatch               dispatcher.DeviceDispatcher
+	queue                  chan []byte
+	queueStop              chan struct{}
+	queueDone              chan struct{}
+	queueStopOnce          sync.Once
 }
 
 var (
@@ -132,6 +141,7 @@ var (
 	cmdKeepAlive          = []byte{0x12}
 	cmdSetPollingRate     = []byte{0x01, 0x01, 0x00}
 	cmdBatteryLevel       = []byte{0x02, 0x0f}
+	cmdBatteryCharge      = []byte{0x02, 0x10}
 	cmdOpenEndpoint       = []byte{0x0d, 0x02, 0x02}
 	cmdCloseEndpoint      = []byte{0x05, 0x01, 0x02}
 	cmdKeyAssignment      = []byte{0x06, 0x02}
@@ -191,6 +201,7 @@ func Init(vendorId, productId uint16, _, path string) *common.Device {
 		Usb:       true,
 		Connected: true,
 		dev:       dev,
+		Path:      path,
 		Template:  "makr75W.html",
 		VendorId:  vendorId,
 		ProductId: productId,
@@ -219,6 +230,9 @@ func Init(vendorId, productId uint16, _, path string) *common.Device {
 			8:  "Sniper",
 			9:  "Mouse",
 			10: "Macro",
+			21: "Change Profile",
+			22: "Profile Switch",
+			23: "Global Profile",
 		},
 		autoRefreshChan: make(chan struct{}),
 		keepAliveChan:   make(chan struct{}),
@@ -255,10 +269,24 @@ func Init(vendorId, productId uint16, _, path string) *common.Device {
 	d.backendListener()        // Control listener
 	d.setupClusterController() // RGB Cluster
 	d.setupPerformance()       // Performance
+	d.startQueueWorker()       // Queue
+	d.setupOpenRGBController() // OpenRGB Controller
 	d.createDevice()           // Device register
+	d.updateStats()            // Stats
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Device successfully initialized")
 
 	return d.instance
+}
+
+// updateStats will update device stats
+func (d *Device) updateStats() {
+	stats.UpdateDeviceConnectionStatus(d.Serial, d.Connected)
+	batteryCharge, err := d.transfer(cmdBatteryCharge, nil)
+	if err != nil {
+		logger.Log(logger.Fields{"error": err, "serial": d.Serial}).Error("Unable to get battery charge status")
+		return
+	}
+	stats.UpdateBatteryChargeStatus(d.Serial, batteryCharge[3])
 }
 
 // createDevice will create new device register object
@@ -296,6 +324,11 @@ func (d *Device) GetRgbProfiles() interface{} {
 // Stop will stop all device operations and switch a device back to hardware mode
 func (d *Device) Stop() {
 	d.Exit = true
+	d.stopQueueWorker()
+	if d.queueDone != nil {
+		<-d.queueDone
+	}
+	openrgb.RemoveDeviceControllerBySerial(d.Serial)
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Stopping device...")
 	if d.activeRgb != nil {
 		d.activeRgb.Stop()
@@ -326,6 +359,11 @@ func (d *Device) Stop() {
 // StopDirty will stop device without closing the file handle.
 func (d *Device) StopDirty() uint8 {
 	d.Exit = true
+	d.stopQueueWorker()
+	if d.queueDone != nil {
+		<-d.queueDone
+	}
+	openrgb.RemoveDeviceControllerBySerial(d.Serial)
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Stopping device (dirty)...")
 	if d.activeRgb != nil {
 		d.activeRgb.Stop()
@@ -343,6 +381,7 @@ func (d *Device) StopDirty() uint8 {
 		})
 	}()
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Device stopped")
+	d.Connected = false
 	return 1
 }
 
@@ -568,7 +607,7 @@ func (d *Device) setupPerformance() {
 	d.setupKeyAssignment()
 
 	if d.isRgbStatic() {
-		if !d.DeviceProfile.RGBCluster {
+		if !d.DeviceProfile.RGBCluster && !d.DeviceProfile.OpenRGBIntegration {
 			if d.activeRgb != nil {
 				d.activeRgb.Exit <- true
 				d.activeRgb = nil
@@ -614,6 +653,9 @@ func (d *Device) setHardwareMode() {
 
 // getBatterLevel will return initial battery level
 func (d *Device) getBatterLevel() {
+	if d.Exit {
+		return
+	}
 	batteryLevel, err := d.transfer(cmdBatteryLevel, nil)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to get battery level")
@@ -750,6 +792,7 @@ func (d *Device) saveDeviceProfile() {
 		deviceProfile.LCDMode = d.DeviceProfile.LCDMode
 		deviceProfile.LCDRotation = d.DeviceProfile.LCDRotation
 		deviceProfile.RGBCluster = d.DeviceProfile.RGBCluster
+		deviceProfile.OpenRGBIntegration = d.DeviceProfile.OpenRGBIntegration
 		deviceProfile.DisableAltTab = d.DeviceProfile.DisableAltTab
 		deviceProfile.DisableAltF4 = d.DeviceProfile.DisableAltF4
 		deviceProfile.DisableShiftTab = d.DeviceProfile.DisableShiftTab
@@ -840,7 +883,27 @@ func (d *Device) loadDeviceProfiles() {
 		}
 	}
 	d.UserProfiles = profileList
+	d.rebuildProfileOrder()
 	d.getDeviceProfile()
+}
+
+// GetDeviceProfiles will return list of available profiles
+func (d *Device) GetDeviceProfiles() interface{} {
+	profiles := make([]string, 0, len(d.UserProfiles))
+
+	for name := range d.UserProfiles {
+		profiles = append(profiles, name)
+	}
+	return profiles
+}
+
+// rebuildProfileOrder will return profile order
+func (d *Device) rebuildProfileOrder() {
+	d.ProfileOrder = d.ProfileOrder[:0]
+	for name := range d.UserProfiles {
+		d.ProfileOrder = append(d.ProfileOrder, name)
+	}
+	sort.Strings(d.ProfileOrder)
 }
 
 // getDeviceProfile will load persistent device configuration
@@ -877,7 +940,11 @@ func (d *Device) setKeepAlive() {
 		for {
 			select {
 			case <-d.timerKeepAlive.C:
+				if d.Exit {
+					return
+				}
 				d.keepAlive()
+				d.getBatterLevel()
 			case <-d.keepAliveChan:
 				d.timerKeepAlive.Stop()
 				return
@@ -921,6 +988,46 @@ func (d *Device) UpdateDeviceLabel(_ int, label string) uint8 {
 	return 1
 }
 
+// rotateDeviceProfile will rotate and activate next user profile
+func (d *Device) rotateDeviceProfile() {
+	if d.DeviceProfile == nil || len(d.ProfileOrder) == 0 || len(d.UserProfiles) == 0 {
+		return
+	}
+
+	var currentName string
+	for name, profile := range d.UserProfiles {
+		if profile.Active {
+			currentName = name
+			break
+		}
+	}
+
+	if currentName == "" {
+		next := d.ProfileOrder[0]
+		d.ChangeDeviceProfile(next)
+		return
+	}
+	idx := -1
+	for i, name := range d.ProfileOrder {
+		if name == currentName {
+			idx = i
+			break
+		}
+	}
+
+	if idx == -1 {
+		next := d.ProfileOrder[0]
+		d.ChangeDeviceProfile(next)
+		return
+	}
+
+	nextIdx := (idx + 1) % len(d.ProfileOrder)
+	next := d.ProfileOrder[nextIdx]
+
+	d.ChangeDeviceProfile(next)
+	return
+}
+
 // saveRgbProfile will save rgb profile data
 func (d *Device) saveRgbProfile() {
 	rgbDirectory := pwd + "/database/rgb/"
@@ -943,6 +1050,8 @@ func (d *Device) UpdatePollingRate(pullingRate int) uint8 {
 			return 0
 		}
 		d.Exit = true
+		d.stopQueueWorker()
+		openrgb.RemoveDeviceControllerBySerial(d.Serial)
 		if d.activeRgb != nil {
 			d.activeRgb.Exit <- true
 			d.activeRgb = nil
@@ -1089,6 +1198,9 @@ func (d *Device) UpdateRgbProfile(_ int, profile string) uint8 {
 		return 0
 	}
 
+	if d.DeviceProfile.OpenRGBIntegration {
+		return 4
+	}
 	if d.DeviceProfile.RGBCluster {
 		return 5
 	}
@@ -1130,6 +1242,9 @@ func (d *Device) ProcessSetRgbCluster(enabled bool) uint8 {
 		return 0
 	}
 
+	if enabled && d.DeviceProfile.OpenRGBIntegration {
+		return 2
+	}
 	d.DeviceProfile.RGBCluster = enabled
 	d.saveDeviceProfile() // Save profile
 	if d.activeRgb != nil {
@@ -1151,6 +1266,80 @@ func (d *Device) ProcessSetRgbCluster(enabled bool) uint8 {
 		cluster.Get().RemoveDeviceControllerBySerial(d.Serial)
 	}
 	return 1
+}
+
+// ProcessSetOpenRgbIntegration will update OpenRGB integration status
+func (d *Device) ProcessSetOpenRgbIntegration(enabled bool) uint8 {
+	if d.DeviceProfile == nil {
+		return 0
+	}
+
+	if enabled && d.DeviceProfile.RGBCluster {
+		return 2
+	}
+
+	if d.activeRgb != nil {
+		d.activeRgb.Exit <- true
+		d.activeRgb = nil
+	}
+
+	d.clearQueue()
+	d.DeviceProfile.OpenRGBIntegration = enabled
+	d.saveDeviceProfile()
+	d.setDeviceColor()
+	return 1
+}
+
+// newOpenRGBController will create new OpenRGB controller object
+func (d *Device) newOpenRGBController() *common.OpenRGBController {
+	if d.DeviceProfile == nil {
+		return nil
+	}
+	leds, matrix, offsets, colors := d.buildOpenRGBKeyboard(d.getCurrentKeyboard())
+
+	if len(leds) == 0 {
+		return nil
+	}
+
+	controller := &common.OpenRGBController{
+		Name:        d.Product,
+		Vendor:      "Corsair",
+		Description: "OpenLinkHub Backend Device",
+		FwVersion:   d.Firmware,
+		Serial:      d.Serial,
+		Location:    fmt.Sprintf("HID: %s", d.Path),
+		DeviceType:  common.DeviceTypeKeyboard,
+		ColorMode:   common.ColorModePerLed,
+		LEDs:        leds, Colors: colors,
+		Zones: []common.OpenRGBZone{
+			{
+				Name:     "Keyboard",
+				NumLEDs:  uint32(len(leds)),
+				ZoneType: common.ZoneTypeMatrix, Matrix: matrix,
+			},
+		},
+		WriteColorEx: func(data []byte, _ int) {
+			d.writeColorEx(data, offsets)
+		},
+	}
+
+	return controller
+}
+
+// setupOpenRGBController will setup new OpenRGB controller
+func (d *Device) setupOpenRGBController() {
+	if controller := d.newOpenRGBController(); controller != nil {
+		openrgb.AddDeviceController(controller)
+		openrgb.SendToOpenRGB()
+	}
+}
+
+// refreshOpenRGBController will refresh device in OpenRGB
+func (d *Device) refreshOpenRGBController() {
+	d.clearQueue()
+	if controller := d.newOpenRGBController(); controller != nil {
+		openrgb.UpdateDeviceController(d.Serial, controller)
+	}
 }
 
 // ChangeDeviceBrightness will change device brightness
@@ -1183,6 +1372,7 @@ func (d *Device) ChangeDeviceProfile(profileName string) uint8 {
 		newProfile.Active = true
 		d.DeviceProfile = newProfile
 		d.saveDeviceProfile()
+		d.refreshOpenRGBController()
 		d.setDeviceColor()
 		return 1
 	}
@@ -1233,6 +1423,7 @@ func (d *Device) ChangeKeyboardLayout(layout string) uint8 {
 				d.DeviceProfile.Keyboards["default"] = keyboardLayout
 				d.DeviceProfile.Layout = layout
 				d.saveDeviceProfile()
+				d.refreshOpenRGBController()
 				d.setupPerformance()
 				return 1
 			}
@@ -1301,6 +1492,7 @@ func (d *Device) UpdateKeyboardProfile(profileName string) uint8 {
 		d.activeRgb.Exit <- true
 		d.activeRgb = nil
 	}
+	d.refreshOpenRGBController()
 	d.setDeviceColor()
 	return 1
 }
@@ -1380,6 +1572,7 @@ func (d *Device) DeleteKeyboardProfile(profileName string) uint8 {
 		d.activeRgb.Exit <- true
 		d.activeRgb = nil
 	}
+	d.refreshOpenRGBController()
 	d.setDeviceColor()
 	return 1
 }
@@ -1792,6 +1985,26 @@ func (d *Device) setDeviceColor() {
 		return
 	}
 
+	// OpenRGB
+	if d.DeviceProfile.OpenRGBIntegration {
+		var buf = make([]byte, colorPacketLength)
+		if _, ok := d.DeviceProfile.Keyboards[d.DeviceProfile.Profile]; ok {
+			for _, rows := range d.DeviceProfile.Keyboards[d.DeviceProfile.Profile].Row {
+				for _, key := range rows.Keys {
+					for _, packetIndex := range key.PacketIndex {
+						buf[packetIndex] = 0x00
+						buf[packetIndex+1] = 0x00
+						buf[packetIndex+2] = 0x00
+					}
+				}
+			}
+			d.writeColor(buf) // Write color once
+		}
+
+		logger.Log(logger.Fields{}).Info("Exiting setDeviceColor() due to OpenRGB client")
+		return
+	}
+
 	if d.GetRgbProfile(d.DeviceProfile.RGBProfile) == nil {
 		d.DeviceProfile.RGBProfile = "keyboard"
 	}
@@ -2066,15 +2279,119 @@ func (d *Device) setDeviceColor() {
 	}(d.LEDChannels)
 }
 
+// writeColorEx will write data to the device from OpenRGB client
+func (d *Device) writeColorEx(data []byte, offsets []int) {
+	if d.Exit || d.DeviceProfile == nil || !d.DeviceProfile.OpenRGBIntegration || d.DeviceProfile.RGBCluster {
+		return
+	}
+
+	select {
+	case <-d.queueStop:
+		return
+	default:
+	}
+
+	buffer := d.openRGBColorBuffer(data, offsets)
+	if buffer == nil {
+		return
+	}
+	select {
+	case <-d.queueStop:
+		return
+	case d.queue <- buffer:
+	default:
+	}
+}
+
+// clearQueue will clear queue
+func (d *Device) clearQueue() {
+	for {
+		select {
+		case <-d.queue:
+		default:
+			return
+		}
+	}
+}
+
+// stopQueueWorker will stop queue worker for OpenRGB client
+func (d *Device) stopQueueWorker() {
+	if d.queueStop == nil {
+		return
+	}
+	d.queueStopOnce.Do(func() { close(d.queueStop) })
+	d.clearQueue()
+}
+
+// startQueueWorker will initialize queue system and control packet flow towards the device
+func (d *Device) startQueueWorker() {
+	d.queue = make(chan []byte, 10)
+	d.queueStop = make(chan struct{})
+	d.queueDone = make(chan struct{})
+	go func() {
+		defer close(d.queueDone)
+		for {
+			var data []byte
+			select {
+			case <-d.queueStop:
+				return
+			case data = <-d.queue:
+			}
+
+			d.deviceLock.Lock()
+			select {
+			case <-d.queueStop:
+				d.deviceLock.Unlock()
+				return
+			default:
+			}
+			if d.Exit || d.DeviceProfile == nil || !d.DeviceProfile.OpenRGBIntegration || d.DeviceProfile.RGBCluster {
+				d.deviceLock.Unlock()
+				continue
+			}
+			if d.DeviceProfile.RgbOff {
+				clear(data)
+			}
+			d.writeColorBuffer(data)
+			d.deviceLock.Unlock()
+
+			select {
+			case <-d.queueStop:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}()
+}
+
 // writeColor will write color data to the device
 func (d *Device) writeColor(data []byte) {
 	d.deviceLock.Lock()
 	defer d.deviceLock.Unlock()
 
-	if d.Exit {
+	if d.Exit || d.DeviceProfile == nil {
 		return
 	}
+	d.writeColorBuffer(data)
+}
 
+// openRGBColorBuffer generates OpenRGB buffer for colors
+func (d *Device) openRGBColorBuffer(data []byte, offsets []int) []byte {
+	if len(data) != len(offsets)*3 {
+		return nil
+	}
+	buffer := make([]byte, colorPacketLength)
+	for i, offset := range offsets {
+		if offset < 0 || offset+2 >= len(buffer) {
+			return nil
+		}
+		copy(buffer[offset:offset+3], data[i*3:i*3+3])
+	}
+	return buffer
+}
+
+// writeColorBuffer writes color buffer to the device
+func (d *Device) writeColorBuffer(data []byte) {
 	if d.DeviceProfile.Performance {
 		data[0] = 255
 		data[1] = 255
@@ -2516,6 +2833,15 @@ func (d *Device) triggerKeyAssignment(value []byte, functionKey bool, modifierKe
 				}
 			}
 			break
+		case 21:
+			d.ChangeDeviceProfile(key.DeviceId)
+			break
+		case 22:
+			d.rotateDeviceProfile()
+			break
+		case 23:
+			appmonitor.ManualApplicationProfileChange(key.DeviceId)
+			break
 		}
 	}
 }
@@ -2543,6 +2869,146 @@ func (d *Device) writeKeyAssignment(data []byte) {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to close write endpoint")
 		return
 	}
+}
+
+// buildOpenRGBKeyboard will build OpenRGB compatibly keyboard layout
+func (d *Device) buildOpenRGBKeyboard(keyboard *keyboards.Keyboard) ([]common.OpenRGGLed, [][]uint32, []int, []byte) {
+	if keyboard == nil {
+		return nil, nil, nil, nil
+	}
+	const na = -1
+
+	positions := [6][16]int{
+		{41, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, na, 76, na},
+		{53, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 45, 46, na, 42, 74},
+		{43, na, 20, 26, 8, 21, 23, 28, 24, 12, 18, 19, 47, 48, na, 75},
+		{57, na, 4, 22, 7, 9, 10, 11, 13, 14, 15, 51, 52, 50, 40, 78},
+		{106, 100, 29, 27, 6, 25, 5, 17, 16, 54, 55, 56, 110, na, 82, 77},
+		{105, 108, 107, na, 0, na, 44, na, na, na, 111, 122, 109, 80, 81, 79},
+	}
+
+	byAddress := make(map[int]keyboards.Key)
+	for _, row := range keyboard.Row {
+		for _, key := range row.Keys {
+			if key.NoColor {
+				continue
+			}
+			for _, offset := range key.PacketIndex {
+				if offset >= 0 && offset+2 < colorPacketLength && offset%3 == 0 {
+					byAddress[offset/3] = key
+				}
+			}
+		}
+	}
+
+	_, ansi := byAddress[49]
+	if ansi {
+		positions[2][14] = 49
+		positions[3][13], positions[3][14] = 40, na
+	}
+
+	matrix := make([][]uint32, len(positions))
+	for y := range matrix {
+		matrix[y] = make([]uint32, len(positions[y]))
+		for x := range matrix[y] {
+			matrix[y][x] = common.NA
+		}
+	}
+
+	var leds []common.OpenRGGLed
+	var offsets []int
+	var colors []byte
+
+	for x := 0; x < len(positions[0]); x++ {
+		for y := range positions {
+			address := positions[y][x]
+			key, ok := byAddress[address]
+			if !ok {
+				continue
+			}
+
+			matrix[y][x] = uint32(len(leds))
+			leds = append(leds,
+				common.OpenRGGLed{
+					Name:  d.openRGBKeyName(key, address, ansi),
+					Value: uint32(address),
+				},
+			)
+
+			offsets = append(offsets, address*3)
+			colors = append(colors, byte(key.Color.Red), byte(key.Color.Green), byte(key.Color.Blue))
+		}
+	}
+
+	return leds, matrix, offsets, colors
+}
+
+// openRGBKeyName handles mismatch in key names
+func (d *Device) openRGBKeyName(key keyboards.Key, address int, ansi bool) string {
+	if address >= 58 && address <= 69 {
+		return fmt.Sprintf("Key: F%d", address-57)
+	}
+
+	special := map[int]string{
+		77:  "End",
+		74:  "Home",
+		76:  "Delete",
+		75:  "Page Up",
+		78:  "Page Down",
+		82:  "Up Arrow",
+		80:  "Left Arrow",
+		81:  "Down Arrow",
+		79:  "Right Arrow",
+		41:  "Escape",
+		42:  "Backspace",
+		43:  "Tab",
+		57:  "Caps Lock",
+		106: "Left Shift",
+		110: "Right Shift",
+		105: "Left Control",
+		108: "Left Windows",
+		107: "Left Alt",
+		111: "Right Alt",
+		122: "Right Fn",
+		101: "Menu",
+		109: "Right Control",
+		44:  "Space",
+	}
+
+	if address == 0 || address == 1 {
+		return ""
+	}
+
+	if address == 40 {
+		if ansi {
+			return "Key: Enter"
+		}
+		return "Key: Enter (ISO)"
+	}
+
+	if name, ok := special[address]; ok {
+		return "Key: " + name
+	}
+
+	if address == 100 && strings.HasPrefix(key.KeyName, "\\") {
+		return "Key: \\ (ISO)"
+	}
+
+	switch key.KeyName {
+	case "Sz \\ ?", "Sz ?":
+		return "Key: ß"
+	case "'`":
+		return "Key: `"
+	case "< >":
+		return "Key: < >"
+	}
+
+	fields := strings.Fields(key.KeyName)
+	if len(fields) == 0 {
+		return fmt.Sprintf("LED %d", address)
+	}
+
+	return "Key: " + fields[0]
 }
 
 // transfer will send data to a device and retrieve device output
@@ -2576,6 +3042,9 @@ func (d *Device) transfer(endpoint, buffer []byte) ([]byte, error) {
 // getListenerData will listen for keyboard events and return data on success or nil on failure.
 // ReadWithTimeout is mandatory due to the nature of listening for events
 func (d *Device) getListenerData() []byte {
+	if d.listener == nil {
+		return nil
+	}
 	data := make([]byte, bufferSize)
 	n, err := d.listener.ReadWithTimeout(data, 100*time.Millisecond)
 	if err != nil || n == 0 {
@@ -2603,6 +3072,11 @@ func (d *Device) backendListener() {
 			logger.Log(logger.Fields{"error": err, "vendorId": d.VendorId}).Error("Unable to enumerate devices")
 		}
 
+		if d.listener == nil {
+			logger.Log(logger.Fields{"serial": d.Serial}).Error("Unable to open device listener")
+			return
+		}
+
 		for {
 			select {
 			default:
@@ -2617,6 +3091,7 @@ func (d *Device) backendListener() {
 
 				data := d.getListenerData()
 				if len(data) == 0 || data == nil {
+					time.Sleep(5 * time.Millisecond)
 					continue
 				}
 

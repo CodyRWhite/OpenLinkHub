@@ -10,6 +10,7 @@ import (
 	"OpenLinkHub/src/logger"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -91,7 +92,10 @@ func Init() {
 
 // GetProfile will return macro profile based on macro ID
 func GetProfile(macroId int) *Macro {
+	mutex.Lock()
+	defer mutex.Unlock()
 	if val, ok := macros[macroId]; ok {
+		val.Actions = maps.Clone(val.Actions)
 		return &val
 	}
 	return nil
@@ -99,7 +103,14 @@ func GetProfile(macroId int) *Macro {
 
 // GetProfiles will return all macro profiles
 func GetProfiles() map[int]Macro {
-	return macros
+	mutex.Lock()
+	defer mutex.Unlock()
+	profiles := maps.Clone(macros)
+	for id, profile := range profiles {
+		profile.Actions = maps.Clone(profile.Actions)
+		profiles[id] = profile
+	}
+	return profiles
 }
 
 // DeleteMacroValue will delete macro value
@@ -120,25 +131,28 @@ func DeleteMacroValue(macroId, macroIndex int) uint8 {
 }
 
 // validatePressAndHold will validate press and hold action
-func validatePressAndHold(macroId int) bool {
+func validatePressAndHold(macroId, macroIndex int) bool {
 	count := 0
 	length := 0
+
 	if val, ok := macros[macroId]; ok {
-		for _, v := range val.Actions {
+		for index, v := range val.Actions {
 			if v.ActionType == 5 {
 				continue
 			}
 
 			length++
-			if v.ActionHold {
+
+			if index == macroIndex || v.ActionHold {
 				count++
 			}
 		}
 
-		if count+1 == length {
+		if count == length {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -150,7 +164,7 @@ func UpdateMacroValue(macroId, macroIndex int, macroAction *Actions) uint8 {
 		profile := fmt.Sprintf("%s/database/macros/%s.json", config.GetConfig().ConfigPath, strings.ToLower(val.Name))
 		if action, ok := val.Actions[macroIndex]; ok {
 			if macroAction.ActionHold {
-				if !validatePressAndHold(macroId) {
+				if !validatePressAndHold(macroId, macroIndex) {
 					return 2
 				}
 			}

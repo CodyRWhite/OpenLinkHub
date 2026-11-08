@@ -1,0 +1,22 @@
+{{ define "xeneon-storage" }}
+{{ $root := .Root }}
+{{ $widget := .WidgetArea.Widget }}
+<div class="edge-panel xeneon-extra" id="xeneon-storage" style="--widget-text: {{ $widget.TextColor }}; --widget-subtext: {{ $widget.SubTextColor }}; --widget-accent: {{ $widget.DataColor }}; --widget-font-size: {{ $widget.FontSize }}px; --widget-subfont-size: {{ $widget.SubFontSize }}px;" data-mount-point="{{ $widget.MountPoint }}" data-storage-sensor="{{ $widget.StorageSensor }}" data-temperature-unit="{{ $widget.Unit }}">
+    <div class="card system-card">
+        <div class="card-body">
+            <div class="xeneon-extra-heading">{{ $widget.HeaderText }}</div>
+            <div class="xeneon-resource-scroll">
+                <div class="xeneon-filesystem-list"></div>
+                <div class="xeneon-extra-status storage-status" role="status">{{ $root.Lang "txtXeneonLoading" }}</div>
+                {{ if $widget.StorageSensor }}
+                <div class="xeneon-storage-temperatures">
+                    <div class="xeneon-extra-heading">{{ $root.Lang "txtXeneonTemperatures" }}</div>
+                    <div class="xeneon-storage-temperature-list"></div>
+                    <div class="xeneon-extra-status storage-temperature-status" role="status">{{ $root.Lang "txtXeneonLoading" }}</div>
+                </div>
+                {{ end }}
+            </div>
+        </div>
+    </div>
+</div>
+{{ end }}

@@ -19,6 +19,8 @@ import (
 	"io"
 	"math"
 	"math/big"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,16 +47,18 @@ type Slipstream struct {
 }
 
 type Device struct {
-	ProductType uint16
-	Product     string
-	Serial      string
-	Firmware    string
-	Image       string
-	GetDevice   interface{}
-	Instance    interface{} `json:"-"`
-	Hidden      bool
-	DeviceType  uint32
-	ProductId   uint16
+	ProductType  uint16
+	Product      string
+	Serial       string
+	Firmware     string
+	Image        string
+	GetDevice    interface{}
+	Instance     interface{} `json:"-"`
+	Hidden       bool
+	DeviceType   uint32
+	ProductId    uint16
+	DevicePath   string
+	DeviceLookup string
 }
 
 type KeyboardPerformance struct {
@@ -186,6 +190,8 @@ const (
 	ProductTypeIronClawSEWU         = 248
 	ProductTypeNightswordV2W        = 249
 	ProductTypeNightswordV2WU       = 250
+	ProductTypeHarpoonV2W           = 251
+	ProductTypeHarpoonV2WU          = 252
 	ProductTypeVirtuosoXTW          = 300
 	ProductTypeVirtuosoXTWU         = 301
 	ProductTypeVirtuosoMAXW         = 302
@@ -271,12 +277,18 @@ type OpenRGBSegment struct {
 	LedCount uint32
 }
 
+type OpenRGGLed struct {
+	Name  string
+	Value uint32
+}
+
 type OpenRGBZone struct {
 	Name     string
 	NumLEDs  uint32
 	MinLeds  uint32
 	ZoneType uint32
 	Segments []OpenRGBSegment
+	Matrix   [][]uint32
 }
 
 type OpenRGBController struct {
@@ -287,6 +299,7 @@ type OpenRGBController struct {
 	Serial       string
 	Location     string
 	Zones        []OpenRGBZone
+	LEDs         []OpenRGGLed
 	Colors       []byte
 	ActiveMode   int32
 	WriteColorEx func([]byte, int)
@@ -300,7 +313,7 @@ type ClusterController struct {
 	Serial       string
 	LedChannels  uint32
 	ChannelId    int
-	WriteColorEx func([]byte, int)
+	WriteColorEx func([]byte, int) `json:"-"`
 }
 
 type LogLevel int
@@ -1041,4 +1054,94 @@ func MaxHIDInputReport(rd []byte) int {
 		return maxSize + 1
 	}
 	return maxSize
+}
+
+func ValidRGB(v float64) bool {
+	return v >= 0 && v <= 255 && math.Trunc(v) == v
+}
+
+// ValidAuthOrigin will validate authentication origin
+func ValidAuthOrigin(value string) bool {
+	if value == "" || strings.ContainsAny(value, " \t\r\n\\?#") {
+		return false
+	}
+
+	origin, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+
+	if origin.Scheme != "https" ||
+		origin.Host == "" ||
+		origin.User != nil ||
+		origin.Opaque != "" ||
+		origin.Path != "" ||
+		origin.RawPath != "" ||
+		origin.RawQuery != "" ||
+		origin.ForceQuery ||
+		origin.Fragment != "" {
+		return false
+	}
+
+	host := origin.Hostname()
+	if host == "" {
+		return false
+	}
+
+	port := origin.Port()
+	if port != "" {
+		for _, character := range port {
+			if character < '0' || character > '9' {
+				return false
+			}
+		}
+
+		portNumber, err := strconv.Atoi(port)
+		if err != nil || portNumber < 1 || portNumber > 65535 {
+			return false
+		}
+	} else if strings.HasSuffix(origin.Host, ":") {
+		return false
+	}
+
+	if strings.HasPrefix(origin.Host, "[") {
+		return net.ParseIP(host) != nil && strings.Contains(host, ":")
+	}
+
+	if strings.Contains(host, ":") {
+		return false
+	}
+
+	if net.ParseIP(host) != nil {
+		return true
+	}
+
+	if len(host) > 253 {
+		return false
+	}
+
+	// Reject invalid IPv4 addresses instead of treating them as hostnames.
+	if strings.Contains(host, ".") && strings.Trim(host, "0123456789.") == "" {
+		return false
+	}
+
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 ||
+			len(label) > 63 ||
+			label[0] == '-' ||
+			label[len(label)-1] == '-' {
+			return false
+		}
+
+		for _, character := range label {
+			if !((character >= 'a' && character <= 'z') ||
+				(character >= 'A' && character <= 'Z') ||
+				(character >= '0' && character <= '9') ||
+				character == '-') {
+				return false
+			}
+		}
+	}
+
+	return true
 }

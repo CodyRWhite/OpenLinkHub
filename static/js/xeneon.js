@@ -44,12 +44,14 @@ $(document).ready(function () {
 
     // System weather
     if ($('#xeneon-weather').length) {
-        const WEATHER_REFRESH_MS = 10 * 60 * 1000;
+        const weatherWidget = $('#xeneon-weather');
+        const WEATHER_REFRESH_MS = (Number(weatherWidget.attr('data-refresh-interval')) || 10) * 60 * 1000;
+        const weatherUnit = weatherWidget.attr('data-unit') === '°F' ? '°F' : '°C';
         const FALLBACK_LOCATION = {
-            name: 'New York',
-            country: 'United States',
-            latitude: 40.7128,
-            longitude: -74.0060,
+            name: weatherWidget.attr('data-city') || 'New York',
+            country: weatherWidget.attr('data-country') || '',
+            latitude: Number(weatherWidget.attr('data-latitude')),
+            longitude: Number(weatherWidget.attr('data-longitude')),
             source: 'Fallback city'
         };
 
@@ -86,7 +88,7 @@ $(document).ready(function () {
             };
             return map[code] || ['Unknown', '🌡️'];
         }
-        
+
         function reverseGeocode(lat, lon) {
             return $.getJSON('https://nominatim.openstreetmap.org/reverse', {
                 format: 'jsonv2',
@@ -100,7 +102,7 @@ $(document).ready(function () {
         function resolveLocation() {
             const dfd = $.Deferred();
 
-            if (!navigator.geolocation) {
+            if (weatherWidget.attr('data-auto-weather') !== 'true' || !navigator.geolocation) {
                 dfd.resolve(FALLBACK_LOCATION);
                 return dfd.promise();
             }
@@ -153,7 +155,7 @@ $(document).ready(function () {
                 hourly: 'temperature_2m',
                 forecast_hours: 8,
                 timezone: 'auto',
-                temperature_unit: 'celsius',
+                temperature_unit: weatherUnit === '°F' ? 'fahrenheit' : 'celsius',
                 wind_speed_unit: 'kmh'
             });
         }
@@ -164,7 +166,7 @@ $(document).ready(function () {
             const [conditionLabel, icon] = weatherCodeToLabel(current.weather_code, current.is_day === 1);
 
             $('#weatherLocation').text(location.name + ', ' + location.country);
-            $('#weatherCondition').text(conditionLabel + ' · Feels like ' + Math.round(current.apparent_temperature || current.temperature_2m || 0) + '°C');
+            $('#weatherCondition').text(conditionLabel + ' · Feels like ' + Math.round(current.apparent_temperature || current.temperature_2m || 0) + weatherUnit);
             $('#weatherTemp').text(Math.round(current.temperature_2m || 0));
             $('#weatherHumidity').text(Math.round(current.relative_humidity_2m || 0) + '%');
             $('#weatherWind').text(Math.round(current.wind_speed_10m || 0) + ' km/h');
@@ -295,7 +297,9 @@ $(document).ready(function () {
             return mins + ':' + String(secs).padStart(2, '0');
         }
         function updateMediaPlayer(json) {
-            if (!json || json.code !== 200 || !json.data) return;
+            if (!json || json.code !== 200 || !json.data) {
+                return;
+            }
 
             const data = json.data;
 
@@ -325,17 +329,22 @@ $(document).ready(function () {
             const $list = $('#xeneon-battery-status .metrics-list');
             $list.empty();
 
-            $.each(json.data.battery, function (deviceId, device) {
+            $.each(json.data.battery || {}, function (deviceId, device) {
+                const filter = $('#xeneon-battery-status').attr('data-battery-device') || '';
+                if (filter && filter !== deviceId) {
+                    return;
+                }
+
                 const name = device.Device || deviceId;
                 const level = Math.max(0, Math.min(100, Number(device.Level) || 0));
                 const html = `
-                  <div class="metric-row" data-device-id="${deviceId}">
+                  <div class="metric-row" >
                     <span class="name"></span>
                     <span class="metric-value">${level}%</span>
                     <div class="metric-bar" style="--fill:${level}%"><span></span></div>
                   </div>
                 `;
-                const $row = $(html);
+                const $row = $(html).attr('data-device-id', deviceId);
                 $row.find('.name').text(name);
                 $list.append($row);
             });
@@ -360,6 +369,16 @@ $(document).ready(function () {
     // Calendar
     if ($('#xeneon-calendar').length) {
         let viewDate = new Date();
+        viewDate.setDate(1);
+        const sundayFirst = Number($('#xeneon-calendar').attr('data-week-start')) === 1;
+        const weekdays = sundayFirst ? ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+        $('#xeneon-calendar .calendar-weekdays').empty();
+
+        weekdays.forEach(function (day) {
+            $('<span>', {
+                text: day
+            }).appendTo('#xeneon-calendar .calendar-weekdays');
+        });
 
         function pad(n) {
             return String(n).padStart(2, '0');
@@ -398,7 +417,7 @@ $(document).ready(function () {
             const lastDay = new Date(year, month + 1, 0);
 
             // Monday-first calendar offset
-            const startOffset = (firstDay.getDay() + 6) % 7;
+            const startOffset = (firstDay.getDay() + (sundayFirst ? 0 : 6)) % 7;
 
             const prevMonthLastDay = new Date(year, month, 0).getDate();
 
@@ -433,9 +452,17 @@ $(document).ready(function () {
                     text: dayNumber
                 });
 
-                if (muted) $day.addClass('is-muted');
-                if (isWeekend) $day.addClass('is-weekend');
-                if (isSameDate(cellDate, today)) $day.addClass('is-today');
+                if (muted) {
+                    $day.addClass('is-muted');
+                }
+
+                if (isWeekend) {
+                    $day.addClass('is-weekend');
+                }
+
+                if (isSameDate(cellDate, today)) {
+                    $day.addClass('is-today');
+                }
 
                 $days.append($day);
             }
@@ -480,7 +507,11 @@ $(document).ready(function () {
         }, options || {});
 
         const safeMax = Math.max(parseFloat(maxValue) || 100, 1);
-        const numericValue = parseFloat(value) || 0;
+        let numericValue = parseFloat(value) || 0;
+        if ($widget.attr('data-temperature-unit') === '°F') {
+            numericValue = numericValue * 9 / 5 + 32;
+        }
+
         const percent = clamp((numericValue / safeMax) * 100, 0, 100);
         const dashOffset = GAUGE_LENGTH * (1 - percent / 100);
         const formattedValue = numericValue.toFixed(settings.decimals).replace(/\.0+$/, '');
@@ -522,14 +553,65 @@ $(document).ready(function () {
         const $widget = $(selector);
         updateRing($widget, payload.value, payload.max || $widget.data('max'), payload);
 
-        if (payload.load != null) $widget.find('.js-load').text(Math.round(payload.load) + '%');
-        if (payload.fan != null) $widget.find('.js-fan').text(Math.round(payload.fan) + ' RPM');
-        if (payload.limit != null) $widget.find('.js-limit').text(Math.round(payload.limit) + '°C');
-        if (payload.vram != null) $widget.find('.js-vram').text(Number(payload.vram).toFixed(1) + ' GB');
-        if (payload.hotspot != null) $widget.find('.js-hotspot').text(Math.round(payload.hotspot) + '°C');
+        if (payload.load != null) {
+            $widget.find('.js-load').text(Math.round(payload.load) + '%');
+        }
+
+        if (payload.fan != null) {
+            $widget.find('.js-fan').text(Math.round(payload.fan) + ' RPM');
+        }
+
+        if (payload.limit != null) {
+            $widget.find('.js-limit').text(Math.round(payload.limit) + '°C');
+        }
+
+        if (payload.vram != null) {
+            $widget.find('.js-vram').text(Number(payload.vram).toFixed(1) + ' GB');
+        }
+
+        if (payload.hotspot != null) {
+            $widget.find('.js-hotspot').text(Math.round(payload.hotspot) + '°C');
+        }
     };
 
     // CPU Temp
+    const deviceWidgets = $('#xeneon-device-temp, #xeneon-device-rpm');
+    if (deviceWidgets.length) {
+        function refreshDeviceSensors() {
+            $.ajax({
+                url: '/api/stats/devices',
+                type: 'GET',
+                cache: false,
+                success: function (response) {
+                    deviceWidgets.each(function () {
+                        const widget = $(this);
+                        const device = response.status === 1 && response.data ? response.data[widget.attr('data-device-id')] : null;
+                        const sensor = device && device.Devices ? device.Devices[widget.attr('data-channel-id')] : null;
+                        const temperature = this.id === 'xeneon-device-temp';
+                        const value = sensor ? (temperature && sensor.TemperatureString ? Number(sensor.Temperature) : !temperature && sensor.Speed ? parseFloat(sensor.Speed) : NaN) : NaN;
+                        widget.find('.ring-progress').css('visibility', Number.isFinite(value) ? 'visible' : 'hidden');
+                        if (Number.isFinite(value)) {
+                            updateRing(widget, value, widget.data('max'));
+                        } else {
+                            updateRing(widget, 0, widget.data('max'));
+                            widget.find('.chart-temp').text('--');
+                            widget.find('.ring-progress').css('stroke-dashoffset', widget.find('.ring-progress').css('stroke-dasharray').split(' ')[0]);
+                        }
+                    });
+                },
+                error: function () {
+                    deviceWidgets.find('.chart-temp').text('--');
+                    deviceWidgets.find('.ring-progress').css('visibility', 'hidden');
+                },
+                complete: function () {
+                    setTimeout(refreshDeviceSensors, 1000);
+                }
+            });
+        }
+
+        refreshDeviceSensors();
+    }
+
     if ($('#xeneon-cpu-temp').length) {
         const $widget = $("#xeneon-cpu-temp");
         setInterval(function () {
@@ -538,9 +620,8 @@ $(document).ready(function () {
                 method: 'GET',
                 dataType: 'json',
                 success: function (response) {
-                    if (response.status === 1 && response.data) {
+                    if (response.status === 1 && response.data != null) {
                         updateRing($widget, response.data, $widget.data('max'));
-                        setThermalValue($widget, response.data, $widget.data('max'));
                     }
                 },
                 error: function () {
@@ -559,9 +640,8 @@ $(document).ready(function () {
                 method: 'GET',
                 dataType: 'json',
                 success: function (response) {
-                    if (response.status === 1 && response.data) {
+                    if (response.status === 1 && response.data != null) {
                         updateRing($widget, response.data, $widget.data('max'));
-                        setThermalValue($widget, response.data, $widget.data('max'));
                     }
                 },
                 error: function () {
@@ -580,9 +660,8 @@ $(document).ready(function () {
                 method: 'GET',
                 dataType: 'json',
                 success: function (response) {
-                    if (response.status === 1 && response.data) {
+                    if (response.status === 1 && response.data != null) {
                         updateRing($widget, response.data, $widget.data('max'));
-                        setThermalValue($widget, response.data, $widget.data('max'));
                     }
                 },
                 error: function () {
@@ -601,9 +680,8 @@ $(document).ready(function () {
                 method: 'GET',
                 dataType: 'json',
                 success: function (response) {
-                    if (response.status === 1 && response.data) {
+                    if (response.status === 1 && response.data != null) {
                         updateRing($widget, response.data, $widget.data('max'));
-                        setThermalValue($widget, response.data, $widget.data('max'));
                     }
                 },
                 error: function () {
@@ -611,5 +689,538 @@ $(document).ready(function () {
                 }
             });
         }, 1000);
+    }
+
+    // Temperature history
+    if ($('#xeneon-temperature-history').length) {
+        const widget = $('#xeneon-temperature-history');
+        const samples = [];
+        const minutes = Number(widget.attr('data-history-minutes')) || 5;
+        const maximum = Number(widget.attr('data-max')) || 100;
+        const source = widget.attr('data-source');
+        const unit = widget.attr('data-temperature-unit');
+
+        function drawHistory(value) {
+            const now = Date.now();
+            const windowMs = minutes * 60000;
+
+            if (value !== null && unit === '°F') {
+                value = value * 9 / 5 + 32;
+            }
+
+            samples.push({
+                time: now,
+                value: value
+            });
+
+            while (samples.length && samples[0].time < now - windowMs) {
+                samples.shift();
+            }
+
+            const values = samples.filter(function (sample) {
+                return sample.value !== null;
+            }).map(function (sample) {
+                return sample.value;
+            });
+
+            widget.find('.xeneon-history-value').text(value === null ? '--' : value.toFixed(1));
+            widget.find('.history-min').text(values.length ? Math.min.apply(null, values).toFixed(1) + ' ' + unit : '--');
+            widget.find('.history-max').text(values.length ? Math.max.apply(null, values).toFixed(1) + ' ' + unit : '--');
+            let line = '';
+            let fill = '';
+            let segment = [];
+
+            function finishSegment() {
+                if (segment.length) {
+                    line += 'M' + segment.join(' L') + ' ';
+                    fill += 'M' + segment[0].split(',')[0] + ',140 L' + segment.join(' L') + ' L' + segment[segment.length - 1].split(',')[0] + ',140 Z ';
+                    segment = [];
+                }
+            }
+            samples.forEach(function (sample, index) {
+                if (sample.value === null || (index && sample.time - samples[index - 1].time > 6000)) {
+                    finishSegment();
+                }
+                if (sample.value !== null) {
+                    const x = 600 * (sample.time - now + windowMs) / windowMs;
+                    const y = 139 - Math.max(0, Math.min(1, sample.value / maximum)) * 138;
+                    segment.push(x.toFixed(2) + ',' + y.toFixed(2));
+                }
+            });
+
+            finishSegment();
+            widget.find('.xeneon-history-line').attr('d', line);
+            widget.find('.xeneon-history-fill').attr('d', fill);
+        }
+
+        function refreshHistory() {
+            let url = '/api/stats/devices';
+            if (source === 'cpu') {
+                url = '/api/cpuTemp/clean';
+            } else if (source === 'gpu') {
+                url = '/api/gpuTemp/clean';
+            }
+
+            $.ajax({
+                url: url,
+                type: 'GET',
+                cache: false,
+                timeout: 5000,
+                success: function (response) {
+                    let value = null;
+                    if (response.status === 1 && response.data != null) {
+                        if (source === 'device') {
+                            const device = response.data[widget.attr('data-device-id')];
+                            const sensor = device && device.Devices ? device.Devices[widget.attr('data-channel-id')] : null;
+                            if (sensor && sensor.TemperatureString && sensor.Temperature != null) {
+                                value = Number(sensor.Temperature);
+                            }
+                        } else {
+                            value = Number(response.data);
+                        }
+                    }
+                    drawHistory(value !== null && Number.isFinite(value) ? value : null);
+                },
+                error: function () {
+                    drawHistory(null);
+                },
+                complete: function () {
+                    setTimeout(refreshHistory, 2000);
+                }
+            });
+        }
+
+        refreshHistory();
+    }
+
+    // Cooling overview
+    if ($('#xeneon-cooling-overview').length) {
+        const widget = $('#xeneon-cooling-overview');
+        const serial = widget.attr('data-device-id');
+
+        function refreshCooling() {
+            if (!serial) {
+                return;
+            }
+
+            $.ajax({
+                url: '/api/stats/devices',
+                type: 'GET',
+                cache: false,
+                timeout: 5000,
+                success: function (response) {
+                    const device = response.status === 1 && response.data ? response.data[serial] : null;
+                    const list = widget.find('.xeneon-cooling-list').empty();
+                    const unit = widget.attr('data-temperature-unit');
+                    Object.keys(device && device.Devices || {}).sort(function (a, b) {
+                        return Number(a) - Number(b);
+                    }).forEach(function (channel) {
+                        const sensor = device.Devices[channel];
+                        if (!sensor.TemperatureString && !sensor.Speed) {
+                            return;
+                        }
+                        const row = $('<div>', {
+                            class: 'xeneon-cooling-row'
+                        });
+
+                        const heading = $('<div>', {
+                            class: 'xeneon-cooling-heading'
+                        }).appendTo(row);
+
+                        $('<span>', {
+                            class: 'xeneon-cooling-name',
+                            text: sensor.Device
+                        }).appendTo(heading);
+
+                        const readings = $('<span>', {
+                            class: 'xeneon-cooling-readings'
+                        }).appendTo(heading);
+
+                        if (sensor.TemperatureString && sensor.Temperature != null && Number.isFinite(Number(sensor.Temperature))) {
+                            let temperature = Number(sensor.Temperature);
+                            if (unit === '°F') {
+                                temperature = temperature * 9 / 5 + 32;
+                            }
+                            $('<span>', {
+                                text: temperature.toFixed(1) + ' ' + unit
+                            }).appendTo(readings);
+                        }
+
+                        const rpm = sensor.Speed ? parseFloat(sensor.Speed) : NaN;
+                        if (Number.isFinite(rpm)) {
+                            $('<strong>', {
+                                text: Math.round(rpm) + ' RPM'
+                            }).appendTo(readings);
+                            const progress = Math.max(0, Math.min(100, rpm / Number(widget.attr('data-max')) * 100));
+                            $('<div>', {
+                                class: 'xeneon-cooling-bar'
+                            }).append($('<span>').css('width', progress + '%')).appendTo(row);
+                        }
+
+                        list.append(row);
+                    });
+                    widget.find('.xeneon-extra-status').text(list.children().length ? '' : i18n.t('txtXeneonUnavailable'));
+                },
+                error: function () {
+                    widget.find('.xeneon-cooling-list').empty();
+                    widget.find('.xeneon-extra-status').text(i18n.t('txtXeneonUnavailable'));
+                },
+                complete: function () {
+                    setTimeout(refreshCooling, 2000);
+                }
+            });
+        }
+
+        refreshCooling();
+    }
+
+    // Profile shortcuts
+    if ($('#xeneon-profile-shortcuts').length) {
+        const widget = $('#xeneon-profile-shortcuts');
+        const serial = widget.attr('data-device-id');
+        let changing = false;
+        let signature = '';
+
+        function refreshProfiles() {
+            if (!serial) {
+                return;
+            }
+
+            if (changing) {
+                setTimeout(refreshProfiles, 3000);
+                return;
+            }
+
+            $.ajax({
+                url: '/api/devices/' + encodeURIComponent(serial),
+                type: 'GET',
+                cache: false,
+                timeout: 5000,
+                success: function (response) {
+                    if (changing) {
+                        return;
+                    }
+
+                    const profiles = response.device && response.device.userProfiles || {};
+                    const names = Object.keys(profiles).filter(function (name) {
+                        return /^[a-zA-Z0-9]+$/.test(name);
+                    }).sort();
+
+                    const current = JSON.stringify(names.map(function (name) {
+                        return [name, !!profiles[name].Active];
+                    }));
+
+                    if (signature !== current) {
+                        signature = current;
+                        const buttons = widget.find('.xeneon-profile-buttons').empty();
+                        names.forEach(function (name) {
+                            $('<button>', {
+                                type: 'button',
+                                class: 'system-button xeneon-profile-button',
+                                text: name
+                            })
+                                .attr('data-profile', name)
+                                .attr('aria-pressed', profiles[name].Active ? 'true' : 'false')
+                                .toggleClass('is-active', !!profiles[name].Active)
+                                .appendTo(buttons);
+                        });
+                    }
+                    widget.find('.xeneon-extra-status').text(names.length ? '' : i18n.t(response.device ? 'txtXeneonNoProfiles' : 'txtXeneonUnavailable'));
+                    widget.find('button').prop('disabled', false);
+                },
+                error: function () {
+                    if (changing) {
+                        return;
+                    }
+                    widget.find('button').prop('disabled', true);
+                    widget.find('.xeneon-extra-status').text(i18n.t('txtXeneonUnavailable'));
+                },
+                complete: function () {
+                    setTimeout(refreshProfiles, 3000);
+                }
+            });
+        }
+        widget.on('click', '.xeneon-profile-button', function () {
+            if (changing || $(this).attr('aria-pressed') === 'true') {
+                return;
+            }
+
+            const name = $(this).attr('data-profile');
+            changing = true;
+            widget.find('button').prop('disabled', true);
+            widget.find('.xeneon-extra-status').text(i18n.t('txtXeneonLoading'));
+
+            const pf = {};
+            pf['deviceId'] = serial;
+            pf['userProfileName'] = name;
+
+            $.ajax({
+                url: '/api/userProfile/change',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify(pf, null, 2),
+                cache: false,
+                timeout: 10000,
+                success: function (response) {
+                    widget.find('.xeneon-extra-status').text(response.message || '');
+                    if (response.status === 1) {
+                        widget.find('button').each(function () {
+                            const active = $(this).attr('data-profile') === name;
+                            $(this).toggleClass('is-active', active)
+                                .attr('aria-pressed', active ? 'true' : 'false');
+                        });
+
+                        signature = '';
+                        if (serial === widget.attr('data-kiosk-id')) {
+                            location.reload();
+                        }
+                    }
+                },
+                error: function () {
+                    widget.find('.xeneon-extra-status').text(i18n.t('txtXeneonProfileFailed'));
+                },
+                complete: function () {
+                    changing = false;
+                    widget.find('button').prop('disabled', false);
+                }
+            });
+        });
+
+        refreshProfiles();
+    }
+
+    // formatResourceBytes will format memory and filesystem sizes using binary units.
+    function formatResourceBytes(value) {
+        const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+        let size = Number(value);
+        let index = 0;
+        while (size >= 1024 && index < units.length - 1) {
+            size = size / 1024;
+            index++;
+        }
+        return size.toFixed(index === 0 ? 0 : 1) + ' ' + units[index];
+    }
+
+    // Memory usage
+    if ($('#xeneon-memory').length) {
+        const widget = $('#xeneon-memory');
+
+        function memoryUnavailable() {
+            widget.find('.xeneon-memory-data').prop('hidden', true);
+            widget.find('.memory-status').text(i18n.t('txtXeneonMemoryUnavailable'));
+        }
+
+        function refreshMemory() {
+            $.ajax({
+                url: '/api/stats/memory',
+                type: 'GET',
+                cache: false,
+                timeout: 5000,
+                success: function (response) {
+                    if (response.status !== 1 || !response.data || response.data.Total <= 0) {
+                        memoryUnavailable();
+                        return;
+                    }
+
+                    const data = response.data;
+                    widget.find('.xeneon-memory-data').prop('hidden', false);
+                    widget.find('.memory-status').text('');
+                    widget.find('.memory-percent').text(data.UsedPercent.toFixed(1) + ' %');
+                    widget.find('.memory-progress').css('width', Math.max(0, Math.min(100, data.UsedPercent)) + '%');
+                    widget.find('.memory-used').text(formatResourceBytes(data.Used));
+                    widget.find('.memory-total').text(formatResourceBytes(data.Total));
+                    widget.find('.memory-available').text(formatResourceBytes(data.Available));
+                    widget.find('.swap-percent').text(data.SwapTotal > 0 ? data.SwapPercent.toFixed(1) + ' %' : '');
+                    widget.find('.swap-progress').css('width', Math.max(0, Math.min(100, data.SwapPercent)) + '%');
+                    widget.find('.swap-used').text(formatResourceBytes(data.SwapUsed));
+                    widget.find('.swap-total').text(formatResourceBytes(data.SwapTotal));
+                    widget.find('.swap-details').prop('hidden', data.SwapTotal === 0);
+                    widget.find('.swap-disabled').prop('hidden', data.SwapTotal !== 0);
+                },
+                error: function () {
+                    memoryUnavailable();
+                },
+                complete: function () {
+                    setTimeout(refreshMemory, 2000);
+                }
+            });
+        }
+
+        refreshMemory();
+    }
+
+    // Storage overview
+    if ($('#xeneon-storage').length) {
+        const widget = $('#xeneon-storage');
+        const mountPoint = widget.attr('data-mount-point');
+        const storageSensor = widget.attr('data-storage-sensor');
+
+        function storageUnavailable() {
+            widget.find('.xeneon-filesystem-list').empty();
+            widget.find('.storage-status').text(i18n.t('txtXeneonStorageUnavailable'));
+        }
+
+        function refreshStorage() {
+            $.ajax({
+                url: '/api/stats/storage',
+                type: 'GET',
+                cache: false,
+                timeout: 5000,
+                success: function (response) {
+                    if (response.status !== 1 || !Array.isArray(response.data)) {
+                        storageUnavailable();
+                        return;
+                    }
+
+                    const scroll = widget.find('.xeneon-resource-scroll').scrollTop();
+                    const list = widget.find('.xeneon-filesystem-list').empty();
+                    response.data.forEach(function (filesystem) {
+                        if (mountPoint && filesystem.MountPoint !== mountPoint) {
+                            return;
+                        }
+
+                        const row = $('<div>', {
+                            class: 'xeneon-filesystem-row'
+                        });
+
+                        const heading = $('<div>', {
+                            class: 'xeneon-resource-heading'
+                        }).appendTo(row);
+
+                        $('<span>', {
+                            text: filesystem.MountPoint
+                        }).appendTo(heading);
+
+                        $('<div>', {
+                            class: 'xeneon-filesystem-device',
+                            text: filesystem.Device + ' · ' + filesystem.Filesystem
+                        }).appendTo(row);
+
+                        if (filesystem.AvailableData) {
+                            $('<strong>', {
+                                text: filesystem.UsedPercent.toFixed(1) + ' %'
+                            }).appendTo(heading);
+
+                            const progress = Math.max(0, Math.min(100, filesystem.UsedPercent));
+
+                            $('<div>', {
+                                class: 'xeneon-resource-bar'
+                            }).append($('<span>').css('width', progress + '%')).appendTo(row);
+
+                            const details = $('<div>', {
+                                class: 'xeneon-resource-details'
+                            }).appendTo(row);
+
+                            $('<span>', {
+                                text: i18n.t('txtXeneonUsed') + ' '
+                            }).append($('<b>', {
+                                text: formatResourceBytes(filesystem.Used)
+                            })).appendTo(details);
+
+                            $('<span>', {
+                                text: i18n.t('txtXeneonTotal') + ' '
+                            }).append($('<b>', {
+                                text: formatResourceBytes(filesystem.Total)
+                            })).appendTo(details);
+
+                            $('<span>', {
+                                text: i18n.t('txtXeneonAvailable') + ' '
+                            }).append($('<b>', {
+                                text: formatResourceBytes(filesystem.Available)
+                            })).appendTo(details);
+                        } else {
+                            $('<div>', {
+                                class: 'xeneon-extra-status',
+                                text: i18n.t('txtXeneonStorageUnavailable')
+                            }).appendTo(row);
+                        }
+                        list.append(row);
+                    });
+                    widget.find('.xeneon-resource-scroll').scrollTop(scroll);
+                    if (list.children().length) {
+                        widget.find('.storage-status').text('');
+                    } else {
+                        widget.find('.storage-status').text(i18n.t(mountPoint ? 'txtXeneonStorageUnavailable' : 'txtXeneonNoStorage'));
+                    }
+                },
+                error: function () {
+                    storageUnavailable();
+                },
+                complete: function () {
+                    setTimeout(refreshStorage, 5000);
+                }
+            });
+        }
+
+        function storageTemperatureUnavailable() {
+            widget.find('.xeneon-storage-temperature-list').empty();
+            widget.find('.storage-temperature-status').text(i18n.t('txtXeneonNoStorageSensors'));
+        }
+
+        function refreshStorageTemperatures() {
+            if (!storageSensor) {
+                return;
+            }
+
+            $.ajax({
+                url: '/api/storageTemp',
+                type: 'GET',
+                cache: false,
+                timeout: 5000,
+                success: function (response) {
+                    if (response.status !== 1 || !Array.isArray(response.data)) {
+                        storageTemperatureUnavailable();
+                        return;
+                    }
+
+                    const scroll = widget.find('.xeneon-resource-scroll').scrollTop();
+                    const list = widget.find('.xeneon-storage-temperature-list').empty();
+                    response.data.forEach(function (sensor) {
+                        if (storageSensor !== '*' && sensor.Key !== storageSensor) {
+                            return;
+                        }
+
+                        if (sensor.Temperature == null || !Number.isFinite(Number(sensor.Temperature))) {
+                            return;
+                        }
+
+                        let temperature = Number(sensor.Temperature);
+                        const unit = widget.attr('data-temperature-unit');
+                        if (unit === '°F') {
+                            temperature = temperature * 9 / 5 + 32;
+                        }
+
+                        const row = $('<div>', {
+                            class: 'xeneon-storage-temperature-row'
+                        });
+
+                        $('<span>', {
+                            text: sensor.Model + ' / ' + sensor.Key
+                        }).appendTo(row);
+
+                        $('<strong>', {
+                            text: temperature.toFixed(1) + ' ' + unit
+                        }).appendTo(row);
+
+                        list.append(row);
+                    });
+                    widget.find('.xeneon-resource-scroll').scrollTop(scroll);
+                    if (list.children().length) {
+                        widget.find('.storage-temperature-status').text('');
+                    } else {
+                        widget.find('.storage-temperature-status').text(i18n.t('txtXeneonNoStorageSensors'));
+                    }
+                },
+                error: function () {
+                    storageTemperatureUnavailable();
+                },
+                complete: function () {
+                    setTimeout(refreshStorageTemperatures, 5000);
+                }
+            });
+        }
+
+        refreshStorage();
+        refreshStorageTemperatures();
     }
 });

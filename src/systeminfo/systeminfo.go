@@ -14,12 +14,35 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
+
+type MemoryUsage struct {
+	Total       uint64
+	Available   uint64
+	Used        uint64
+	UsedPercent float64
+	SwapTotal   uint64
+	SwapUsed    uint64
+	SwapPercent float64
+}
+
+type StorageUsage struct {
+	MountPoint    string
+	Device        string
+	Filesystem    string
+	Total         uint64
+	Used          uint64
+	Available     uint64
+	UsedPercent   float64
+	AvailableData bool
+}
 
 type AmdGfxActivity struct {
 	Value float64 `json:"value"`
@@ -508,4 +531,135 @@ func GetGPUUtilization() int {
 		}
 	}
 	return utilization
+}
+
+// GetMemoryUsage will return memory usage reported by the kernel.
+func GetMemoryUsage() (*MemoryUsage, error) {
+	file, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	return parseMemoryUsage(file)
+}
+
+// parseMemoryUsage will calculate used memory excluding reclaimable memory.
+func parseMemoryUsage(reader io.Reader) (*MemoryUsage, error) {
+	values := make(map[string]uint64)
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) != 3 || fields[2] != "kB" {
+			continue
+		}
+
+		name := strings.TrimSuffix(fields[0], ":")
+		switch name {
+		case "MemTotal", "MemAvailable", "SwapTotal", "SwapFree":
+			value, err := strconv.ParseUint(fields[1], 10, 64)
+			if err != nil || value > ^uint64(0)/1024 {
+				return nil, fmt.Errorf("invalid memory value: %s", name)
+			}
+			values[name] = value * 1024
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	for _, name := range []string{"MemTotal", "MemAvailable", "SwapTotal", "SwapFree"} {
+		if _, ok := values[name]; !ok {
+			return nil, fmt.Errorf("missing memory value: %s", name)
+		}
+	}
+
+	if values["MemTotal"] == 0 || values["MemAvailable"] > values["MemTotal"] || values["SwapFree"] > values["SwapTotal"] {
+		return nil, fmt.Errorf("invalid memory totals")
+	}
+
+	data := &MemoryUsage{
+		Total:     values["MemTotal"],
+		Available: values["MemAvailable"],
+		Used:      values["MemTotal"] - values["MemAvailable"],
+		SwapTotal: values["SwapTotal"],
+		SwapUsed:  values["SwapTotal"] - values["SwapFree"],
+	}
+	data.UsedPercent = float64(data.Used) / float64(data.Total) * 100
+	if data.SwapTotal > 0 {
+		data.SwapPercent = float64(data.SwapUsed) / float64(data.SwapTotal) * 100
+	}
+	return data, nil
+}
+
+// GetStorageUsage will return capacity for mounted local filesystems.
+func GetStorageUsage() ([]StorageUsage, error) {
+	file, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	data, err := parseStorageMounts(file)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range data {
+		var stat syscall.Statfs_t
+		if err = syscall.Statfs(data[i].MountPoint, &stat); err != nil {
+			continue
+		}
+		if stat.Bsize <= 0 || stat.Blocks == 0 || stat.Bfree > stat.Blocks || stat.Bavail > stat.Bfree {
+			continue
+		}
+
+		data[i].Total = stat.Blocks * uint64(stat.Bsize)
+		data[i].Used = (stat.Blocks - stat.Bfree) * uint64(stat.Bsize)
+		data[i].Available = stat.Bavail * uint64(stat.Bsize)
+		data[i].UsedPercent = float64(data[i].Used) / float64(data[i].Total) * 100
+		data[i].AvailableData = true
+	}
+	return data, nil
+}
+
+// parseStorageMounts will select local filesystems and decode escaped mount paths.
+func parseStorageMounts(reader io.Reader) ([]StorageUsage, error) {
+	data := make([]StorageUsage, 0)
+	seen := make(map[string]bool)
+	decoder := strings.NewReplacer("\\040", " ", "\\011", "\t", "\\012", "\n", "\\134", "\\")
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		parts := strings.SplitN(scanner.Text(), " - ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		mount := strings.Fields(parts[0])
+		device := strings.Fields(parts[1])
+		if len(mount) < 6 || len(device) < 3 {
+			continue
+		}
+
+		switch device[0] {
+		case "ext2", "ext3", "ext4", "btrfs", "xfs", "f2fs", "vfat", "exfat", "ntfs", "ntfs3", "zfs":
+		default:
+			continue
+		}
+
+		path := decoder.Replace(mount[4])
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		data = append(data, StorageUsage{
+			MountPoint: path,
+			Device:     decoder.Replace(device[1]),
+			Filesystem: device[0],
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return data, nil
 }

@@ -5,7 +5,10 @@ package server
 // License: GPL-3.0 or later
 
 import (
+	"OpenLinkHub/src/applications"
+	"OpenLinkHub/src/appmonitor"
 	"OpenLinkHub/src/audio"
+	"OpenLinkHub/src/auth"
 	"OpenLinkHub/src/backup"
 	"OpenLinkHub/src/common"
 	"OpenLinkHub/src/config"
@@ -21,6 +24,7 @@ import (
 	"OpenLinkHub/src/metrics"
 	"OpenLinkHub/src/rgb"
 	"OpenLinkHub/src/scheduler"
+	"OpenLinkHub/src/server/certificate"
 	"OpenLinkHub/src/server/requests"
 	"OpenLinkHub/src/stats"
 	"OpenLinkHub/src/systeminfo"
@@ -28,12 +32,16 @@ import (
 	"OpenLinkHub/src/temperatures"
 	"OpenLinkHub/src/templates"
 	"OpenLinkHub/src/version"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Response contains data what is sent back to a client
@@ -162,6 +170,38 @@ func getGpuTemperatureClean(w http.ResponseWriter, _ *http.Request) {
 	resp.Send(w)
 }
 
+// getMemoryUsage will return current memory and swap usage.
+func getMemoryUsage(w http.ResponseWriter, _ *http.Request) {
+	data, err := systeminfo.GetMemoryUsage()
+	status := 1
+	if err != nil {
+		status = 0
+	}
+
+	resp := &Response{
+		Code:   http.StatusOK,
+		Status: status,
+		Data:   data,
+	}
+	resp.Send(w)
+}
+
+// getStorageUsage will return capacity for mounted local filesystems.
+func getStorageUsage(w http.ResponseWriter, _ *http.Request) {
+	data, err := systeminfo.GetStorageUsage()
+	status := 1
+	if err != nil {
+		status = 0
+	}
+
+	resp := &Response{
+		Code:   http.StatusOK,
+		Status: status,
+		Data:   data,
+	}
+	resp.Send(w)
+}
+
 // getStorageTemperature will return current storage temperature
 func getStorageTemperature(w http.ResponseWriter, _ *http.Request) {
 	resp := &Response{
@@ -223,6 +263,39 @@ func getDevices(w http.ResponseWriter, r *http.Request) {
 			Device: devices.GetDevice(deviceId),
 		}
 		resp.Send(w)
+	}
+}
+
+// getDevices returns response on /devices
+func getDeviceProfiles(w http.ResponseWriter, r *http.Request) {
+	deviceId, valid := getVar("/api/device/profiles/", r)
+	if !valid {
+		resp := &Response{
+			Code: http.StatusOK,
+			Data: nil,
+		}
+		resp.Send(w)
+	} else {
+		results := devices.CallDeviceMethod(
+			deviceId,
+			"GetDeviceProfiles",
+		)
+
+		if len(results) > 0 {
+			resp := &Response{
+				Code:   http.StatusOK,
+				Status: 1,
+				Data:   results[0].Interface(),
+			}
+			resp.Send(w)
+		} else {
+			resp := &Response{
+				Code:   http.StatusOK,
+				Status: 0,
+				Data:   nil,
+			}
+			resp.Send(w)
+		}
 	}
 }
 
@@ -383,6 +456,16 @@ func getTemperatureGraph(w http.ResponseWriter, r *http.Request) {
 				Message: language.GetValue("txtNoSuchTemperatureProfile"),
 			}
 		}
+	}
+	resp.Send(w)
+}
+
+// getTemperatureSensors returns response with list of supported temperature sensors
+func getTemperatureSensors(w http.ResponseWriter, _ *http.Request) {
+	resp := &Response{
+		Code:   http.StatusOK,
+		Status: 1,
+		Data:   temperatures.GetSupportedTemperatureSensors(),
 	}
 	resp.Send(w)
 }
@@ -582,6 +665,16 @@ func getMouseButtons(w http.ResponseWriter, _ *http.Request) {
 		Code:   http.StatusOK,
 		Status: 1,
 		Data:   inputmanager.GetMouseButtons(),
+	}
+	resp.Send(w)
+}
+
+// getDeviceStats returns device temperature and speed readings
+func getDeviceStats(w http.ResponseWriter, _ *http.Request) {
+	resp := &Response{
+		Code:   http.StatusOK,
+		Status: 1,
+		Data:   stats.GetAIOStats(),
 	}
 	resp.Send(w)
 }
@@ -992,6 +1085,28 @@ func setDeviceLcd(w http.ResponseWriter, r *http.Request) {
 	resp.Send(w)
 }
 
+// deleteNexusScreen handles saving of NEXUS screens
+func saveNexusScreen(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessSaveNexusScreen(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
+// deleteNexusScreen handles deletion of NEXUS screens
+func deleteNexusScreen(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessDeleteNexusScreen(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
 // setDeviceLcdProfile handles device LCD changes
 func setDeviceLcdProfile(w http.ResponseWriter, r *http.Request) {
 	request := requests.ProcessLcdProfileChange(r)
@@ -1113,6 +1228,50 @@ func changeBrightnessGradual(w http.ResponseWriter, r *http.Request) {
 	resp.Send(w)
 }
 
+// changeContrastGradual handles user contrast change via defined number from 0-100
+func changeContrastGradual(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessContrastChangeGradual(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
+// changeBacklightGradual handles user backlight change via defined number from 0-100
+func changeBacklightGradual(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessBacklightChangeGradual(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
+// changeColorTone handles user color tone change via defined number from 0-100
+func changeColorTone(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessColortoneChange(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
+// resetDeviceSettings handles user device settings reset
+func resetDeviceSettings(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessDeviceSettingsReset(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
 // changePosition handles device position change
 func changePosition(w http.ResponseWriter, r *http.Request) {
 	request := requests.ProcessPositionChange(r)
@@ -1201,9 +1360,64 @@ func getRgbOverride(w http.ResponseWriter, r *http.Request) {
 	resp.Send(w)
 }
 
-// getRgbOverride return RGB override for given device
+// setRgbOverride sets RGB override for given device
 func setRgbOverride(w http.ResponseWriter, r *http.Request) {
 	request := requests.ProcessSetRgbOverride(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
+// getTimewarp return RGB timewarp for given device
+func getRgbTimewarp(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessGetRgbTimewarp(r)
+	resp := &Response{
+		Code:   request.Code,
+		Status: request.Status,
+		Data:   request.Data,
+	}
+	resp.Send(w)
+}
+
+// getXeneonWidget return xeneon widget
+func getXeneonWidget(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessGetXeneonWidget(r)
+	resp := &Response{
+		Code:   request.Code,
+		Status: request.Status,
+		Data:   request.Data,
+	}
+	resp.Send(w)
+}
+
+// setXeneonWidgetArea sets a widget area
+func setXeneonWidgetArea(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessSetXeneonWidgetArea(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
+// saveXeneonWidget saves xeneon widget configuration
+func saveXeneonWidget(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessSaveXeneonWidget(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
+// setRgbTimewarp sets RGB timewarp for given device
+func setRgbTimewarp(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessSetRgbTimewarp(r)
 	resp := &Response{
 		Code:    request.Code,
 		Status:  request.Status,
@@ -1241,6 +1455,36 @@ func setLedData(w http.ResponseWriter, r *http.Request) {
 		Code:   request.Code,
 		Status: request.Status,
 		Data:   request.Data,
+	}
+	resp.Send(w)
+}
+
+// getApplicationProfiles will return list of application profiles
+func getApplicationProfiles(w http.ResponseWriter, _ *http.Request) {
+	resp := &Response{
+		Code:   http.StatusOK,
+		Status: 1,
+		Data:   appmonitor.GetApplicationProfiles(),
+	}
+	resp.Send(w)
+}
+
+// getManualApplicationProfiles will return list of application profiles with manual flag
+func getManualApplicationProfiles(w http.ResponseWriter, _ *http.Request) {
+	resp := &Response{
+		Code:   http.StatusOK,
+		Status: 1,
+		Data:   appmonitor.GetManualApplicationProfiles(),
+	}
+	resp.Send(w)
+}
+
+// getApplications will return list of applications
+func getApplications(w http.ResponseWriter, _ *http.Request) {
+	resp := &Response{
+		Code:   http.StatusOK,
+		Status: 1,
+		Data:   applications.GetAllApplications(),
 	}
 	resp.Send(w)
 }
@@ -1357,6 +1601,17 @@ func setARGBDevice(w http.ResponseWriter, r *http.Request) {
 // setExternalHubDeviceAmount handles device amount change of external-LED hub
 func setExternalHubDeviceAmount(w http.ResponseWriter, r *http.Request) {
 	request := requests.ProcessExternalHubDeviceAmount(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
+// setExternalHubCustomLedCount will set LED count of a custom device connected to an external-LED hub
+func setExternalHubCustomLedCount(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessExternalHubCustomLedCount(r)
 	resp := &Response{
 		Code:    request.Code,
 		Status:  request.Status,
@@ -2047,6 +2302,83 @@ func updateDisplayData(w http.ResponseWriter, r *http.Request) {
 	resp.Send(w)
 }
 
+// getHardwareLights return supported device hardware lights
+func getHardwareLights(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessGetHardwareLights(r)
+	resp := &Response{
+		Code:   request.Code,
+		Status: request.Status,
+		Data:   request.Data,
+	}
+	resp.Send(w)
+}
+
+// setHardwareLights will set supported device hardware lights
+func setHardwareLights(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessSetHardwareLights(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
+// setHardwareLights will set supported device hardware light profile
+func setHardwareLight(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessSetHardwareLight(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
+// updateAuthSettings will update dashboard auth
+func updateAuthSettings(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessAuthSettings(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
+// saveApplicationProfile will save application profile
+func saveApplicationProfile(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessSaveApplicationProfile(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
+// newApplicationProfile will create new application profile
+func newApplicationProfile(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessNewApplicationProfile(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
+// deleteApplicationProfile handles application profile deletion
+func deleteApplicationProfile(w http.ResponseWriter, r *http.Request) {
+	request := requests.ProcessDeleteApplicationProfile(r)
+	resp := &Response{
+		Code:    request.Code,
+		Status:  request.Status,
+		Message: request.Message,
+	}
+	resp.Send(w)
+}
+
 // uiDeviceOverview handles device overview
 func uiDeviceOverview(w http.ResponseWriter, r *http.Request) {
 	deviceId, valid := getVar("/device/", r)
@@ -2493,6 +2825,62 @@ func uiXeneon(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
+// uiAppsOverview handles overview of applications
+func uiAppsOverview(w http.ResponseWriter, _ *http.Request) {
+	web := templates.Web{}
+	web.Title = dashboard.GetDashboard().PageTitle
+	web.Devices = devices.GetDevices()
+	web.TemperatureProbes = devices.GetTemperatureProbes()
+	web.InputActions = inputmanager.GetInputActions()
+	web.BuildInfo = version.GetBuildInfo()
+	web.SystemInfo = systeminfo.GetInfo()
+	web.Dashboard = dashboard.GetDashboard()
+	web.CpuTemp = dashboard.GetDashboard().TemperatureToString(temperatures.GetCpuTemperature())
+	web.GpuTemp = dashboard.GetDashboard().TemperatureToString(temperatures.GetGpuTemperature())
+	web.ApplicationProfiles = appmonitor.GetApplicationProfiles()
+	web.Applications = applications.GetAllApplications()
+	web.AppMonitor = config.GetConfig().AppMonitor
+	web.Page = "apps"
+
+	t := templates.GetTemplate()
+
+	for header := range headers {
+		w.Header().Set(headers[header].Key, headers[header].Value)
+	}
+
+	err := t.ExecuteTemplate(w, "apps.html", web)
+	if err != nil {
+		fmt.Println(err)
+		resp := &Response{
+			Code:    http.StatusInternalServerError,
+			Message: language.GetValue("txtUnableToServeWebContent"),
+		}
+		resp.Send(w)
+	}
+}
+
+// uiLogin handles user login
+func uiLogin(w http.ResponseWriter, _ *http.Request) {
+	web := templates.Web{}
+	web.Title = dashboard.GetDashboard().PageTitle
+	web.Dashboard = dashboard.GetDashboard()
+	web.Page = "login"
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+
+	t := templates.GetTemplate()
+	err := t.ExecuteTemplate(w, "login.html", web)
+	if err != nil {
+		fmt.Println(err)
+		resp := &Response{
+			Code:    http.StatusInternalServerError,
+			Message: language.GetValue("txtUnableToServeWebContent"),
+		}
+		resp.Send(w)
+	}
+}
+
 // getVar will extract dynamic path from GET request
 func getVar(path string, r *http.Request) (string, bool) {
 	value := strings.TrimPrefix(r.URL.Path, path)
@@ -2561,12 +2949,14 @@ func setRoutes() http.Handler {
 	handleFunc(r, "/api/storageTemp", http.MethodGet, getStorageTemperature)
 	handleFunc(r, "/api/batteryStats", http.MethodGet, getBatteryStats)
 	handleFunc(r, "/api/devices/", http.MethodGet, getDevices)
+	handleFunc(r, "/api/device/profiles/", http.MethodGet, getDeviceProfiles)
 	handleFunc(r, "/api/color/", http.MethodGet, getColor)
 	handleFunc(r, "/api/color/zone/", http.MethodGet, getZoneColor)
 	handleFunc(r, "/api/color/profile/", http.MethodGet, getColorData)
 	handleFunc(r, "/api/color/override/", http.MethodGet, getCommanderDuoOverride)
 	handleFunc(r, "/api/temperatures/", http.MethodGet, getTemperature)
 	handleFunc(r, "/api/temperatures/graph/", http.MethodGet, getTemperatureGraph)
+	handleFunc(r, "/api/temperatures/sensors/", http.MethodGet, getTemperatureSensors)
 	handleFunc(r, "/api/input/media", http.MethodGet, getMediaKeys)
 	handleFunc(r, "/api/input/keyboard", http.MethodGet, getInputKeys)
 	handleFunc(r, "/api/input/mouse", http.MethodGet, getMouseButtons)
@@ -2581,6 +2971,9 @@ func setRoutes() http.Handler {
 	handleFunc(r, "/api/keyboard/getPerformance/", http.MethodGet, getKeyboardPerformance)
 	handleFunc(r, "/api/keyboard/getFlashTap/", http.MethodGet, getKeyboardFlashTap)
 	handleFunc(r, "/api/systray", http.MethodGet, getSystrayData)
+	handleFunc(r, "/api/stats/devices", http.MethodGet, getDeviceStats)
+	handleFunc(r, "/api/stats/memory", http.MethodGet, getMemoryUsage)
+	handleFunc(r, "/api/stats/storage", http.MethodGet, getStorageUsage)
 	handleFunc(r, "/api/keyboard/dial/getColors/", http.MethodGet, getControlDialColors)
 	handleFunc(r, "/api/getSupportedDevices", http.MethodGet, getSupportedDevices)
 	handleFunc(r, "/api/backup", http.MethodGet, backup.PerformBackup)
@@ -2591,6 +2984,9 @@ func setRoutes() http.Handler {
 	handleFunc(r, "/api/devices/mouse", http.MethodGet, getMouseDevice)
 	handleFunc(r, "/api/media/playback", http.MethodGet, getMediaPlayback)
 	handleFunc(r, "/api/media/", http.MethodGet, mediaPlaybackControl)
+	handleFunc(r, "/api/application/profiles", http.MethodGet, getApplicationProfiles)
+	handleFunc(r, "/api/application/manualProfiles", http.MethodGet, getManualApplicationProfiles)
+	handleFunc(r, "/api/application/applications", http.MethodGet, getApplications)
 
 	// POST
 	handleFunc(r, "/api/temperatures/new", http.MethodPost, newTemperatureProfile)
@@ -2605,6 +3001,8 @@ func setRoutes() http.Handler {
 	handleFunc(r, "/api/color/linkAdapter/bulk", http.MethodPost, setLinkAdapterBulkColor)
 	handleFunc(r, "/api/color/getOverride", http.MethodPost, getRgbOverride)
 	handleFunc(r, "/api/color/setOverride", http.MethodPost, setRgbOverride)
+	handleFunc(r, "/api/color/getTimewarp", http.MethodPost, getRgbTimewarp)
+	handleFunc(r, "/api/color/setTimewarp", http.MethodPost, setRgbTimewarp)
 	handleFunc(r, "/api/color/setTemperatureProbe", http.MethodPost, setTemperatureProbe)
 	handleFunc(r, "/api/color/getLedData", http.MethodPost, getLedData)
 	handleFunc(r, "/api/color/setLedData", http.MethodPost, setLedData)
@@ -2620,15 +3018,21 @@ func setRoutes() http.Handler {
 	handleFunc(r, "/api/hub/linkAdapter", http.MethodPost, setDeviceLinkAdapter)
 	handleFunc(r, "/api/hub/type", http.MethodPost, setExternalHubDeviceType)
 	handleFunc(r, "/api/hub/amount", http.MethodPost, setExternalHubDeviceAmount)
+	handleFunc(r, "/api/hub/customLedCount", http.MethodPost, setExternalHubCustomLedCount)
 	handleFunc(r, "/api/label", http.MethodPost, setDeviceLabel)
 	handleFunc(r, "/api/lcd", http.MethodPost, setDeviceLcd)
 	handleFunc(r, "/api/lcd/device", http.MethodPost, changeDeviceLcd)
 	handleFunc(r, "/api/lcd/rotation", http.MethodPost, setDeviceLcdRotation)
 	handleFunc(r, "/api/lcd/brightness", http.MethodPost, setDeviceLcdBrightness)
+	handleFunc(r, "/api/nexus/screen", http.MethodPost, saveNexusScreen)
 	handleFunc(r, "/api/lcd/profile", http.MethodPost, setDeviceLcdProfile)
 	handleFunc(r, "/api/lcd/image", http.MethodPost, setDeviceLcdImage)
 	handleFunc(r, "/api/brightness", http.MethodPost, changeBrightness)
 	handleFunc(r, "/api/brightness/gradual", http.MethodPost, changeBrightnessGradual)
+	handleFunc(r, "/api/contrast/gradual", http.MethodPost, changeContrastGradual)
+	handleFunc(r, "/api/backlight/gradual", http.MethodPost, changeBacklightGradual)
+	handleFunc(r, "/api/colortone", http.MethodPost, changeColorTone)
+	handleFunc(r, "/api/resetSettings", http.MethodPost, resetDeviceSettings)
 	handleFunc(r, "/api/position/update", http.MethodPost, changePosition)
 	handleFunc(r, "/api/dashboard/update", http.MethodPost, setDashboardSettings)
 	handleFunc(r, "/api/dashboard/sidebar", http.MethodPost, setDashboardSidebar)
@@ -2695,6 +3099,15 @@ func setRoutes() http.Handler {
 	handleFunc(r, "/api/audio/outputDevice", http.MethodPost, setAudioOutputDeviceSettings)
 	handleFunc(r, "/api/devices/channel", http.MethodPost, getChannelData)
 	handleFunc(r, "/api/display/update", http.MethodPost, updateDisplayData)
+	handleFunc(r, "/api/xeneon/getWidget", http.MethodPost, getXeneonWidget)
+	handleFunc(r, "/api/xeneon/saveWidget", http.MethodPost, saveXeneonWidget)
+	handleFunc(r, "/api/xeneon/setWidgetArea", http.MethodPost, setXeneonWidgetArea)
+	handleFunc(r, "/api/devices/getHardwareLights", http.MethodPost, getHardwareLights)
+	handleFunc(r, "/api/devices/setHardwareLights", http.MethodPost, setHardwareLights)
+	handleFunc(r, "/api/devices/setHardwareLight", http.MethodPost, setHardwareLight)
+	handleFunc(r, "/api/auth/update", http.MethodPost, updateAuthSettings)
+	handleFunc(r, "/api/application/profiles/save", http.MethodPost, saveApplicationProfile)
+	handleFunc(r, "/api/application/profiles/new", http.MethodPost, newApplicationProfile)
 
 	// PUT
 	handleFunc(r, "/api/temperatures/update", http.MethodPut, updateTemperatureProfile)
@@ -2712,6 +3125,8 @@ func setRoutes() http.Handler {
 	handleFunc(r, "/api/macro/profile", http.MethodDelete, deleteMacroProfile)
 	handleFunc(r, "/api/userProfile/delete", http.MethodDelete, deleteUserProfile)
 	handleFunc(r, "/api/dashboard/devices/delete", http.MethodDelete, removeDashboardDevice)
+	handleFunc(r, "/api/application/profiles/delete", http.MethodDelete, deleteApplicationProfile)
+	handleFunc(r, "/api/nexus/screen/delete", http.MethodDelete, deleteNexusScreen)
 
 	// Prometheus metrics
 	if config.GetConfig().Metrics {
@@ -2730,7 +3145,9 @@ func setRoutes() http.Handler {
 		handleFunc(r, "/macros", http.MethodGet, uiMacrosOverview)
 		handleFunc(r, "/lcd", http.MethodGet, uiLcdOverview)
 		handleFunc(r, "/settings", http.MethodGet, uiSettings)
-		//handleFunc(r, "/xeneon", http.MethodGet, uiXeneon)
+		handleFunc(r, "/login", http.MethodGet, uiLogin)
+		handleFunc(r, "/xeneon", http.MethodGet, uiXeneon)
+		handleFunc(r, "/apps", http.MethodGet, uiAppsOverview)
 	}
 	return r
 }
@@ -2762,14 +3179,65 @@ func Init() {
 			),
 			Handler: setRoutes(),
 		}
+		scheme := "http"
 
-		fmt.Println(
-			fmt.Sprintf("[Server] Running REST and WebUI on %s. WebUI is accessible via: http://%s",
-				server.Addr,
-				server.Addr,
-			),
+		if dashboard.GetDashboard().AuthEnabled {
+			origin, err := url.Parse(dashboard.GetDashboard().AuthOrigin)
+			if err != nil || origin.Scheme != "https" || origin.Hostname() == "" {
+				logger.Log(logger.Fields{}).Fatal("Authentication requires an HTTPS origin")
+				return
+			}
+
+			cert, err := certificate.EnsureCertificate(
+				filepath.Join(config.GetConfig().ConfigPath, "certificates"),
+				[]string{
+					"localhost",
+					"127.0.0.1",
+					"::1",
+					origin.Hostname(),
+				},
+			)
+			if err != nil {
+				logger.Log(logger.Fields{"error": err}).Fatal("Unable to initialize TLS certificate")
+				return
+			}
+
+			server.TLSConfig = &tls.Config{
+				MinVersion:   tls.VersionTLS12,
+				Certificates: []tls.Certificate{cert},
+			}
+
+			authentication, err := auth.New(
+				auth.Config{
+					Enabled:         dashboard.GetDashboard().AuthEnabled,
+					Username:        dashboard.GetDashboard().AuthUsername,
+					PasswordHash:    dashboard.GetDashboard().AuthPassword,
+					Origin:          dashboard.GetDashboard().AuthOrigin,
+					SessionLifetime: time.Duration(dashboard.GetDashboard().SessionLifetime) * time.Minute,
+				},
+			)
+			if err != nil {
+				logger.Log(logger.Fields{"error": err}).Fatal("Unable to initialize authentication")
+				return
+			}
+
+			server.Handler = authentication.Middleware(setRoutes())
+			scheme = "https"
+		}
+
+		fmt.Printf(
+			"[Server] Running REST and WebUI on %s. WebUI is accessible via: %s://%s\n",
+			server.Addr,
+			scheme,
+			server.Addr,
 		)
-		err := server.ListenAndServe()
+
+		var err error
+		if dashboard.GetDashboard().AuthEnabled {
+			err = server.ListenAndServeTLS("", "")
+		} else {
+			err = server.ListenAndServe()
+		}
 		if err != nil {
 			logger.Log(logger.Fields{"error": err}).Fatal("Unable to start REST server")
 		}

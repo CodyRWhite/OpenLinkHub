@@ -150,6 +150,7 @@ var (
 	cmdOpenEndpoint              = []byte{0x0d, 0x00, 0x01}
 	cmdHeartbeat                 = []byte{0x12}
 	cmdBatteryLevel              = []byte{0x02, 0x0f}
+	cmdBatteryCharge             = []byte{0x02, 0x10}
 	cmdCloseEndpoint             = []byte{0x05, 0x01, 0x01}
 	cmdOpenKeyAssignmentEndpoint = []byte{0x0d, 0x01, 0x02}
 	cmdOpenAnalogDataEndpoint    = []byte{0x0d, 0x01, 0x2b}
@@ -304,9 +305,21 @@ func Init(vendorId, productId uint16, _, path string) *common.Device { // Set gl
 	d.analogDataListener()       // Analog listener
 	d.createDevice()             // Device register
 	d.setGamepadSerial()         // Gamepad serial
+	d.updateStats()              // Stats
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Device successfully initialized")
 
 	return d.instance
+}
+
+// updateStats will update device stats
+func (d *Device) updateStats() {
+	stats.UpdateDeviceConnectionStatus(d.Serial, d.Connected)
+	batteryCharge, err := d.transfer(cmdBatteryCharge, nil)
+	if err != nil {
+		logger.Log(logger.Fields{"error": err, "serial": d.Serial}).Error("Unable to get battery charge status")
+		return
+	}
+	stats.UpdateBatteryChargeStatus(d.Serial, batteryCharge[4])
 }
 
 // setGamepadSerial will set gamepad serial to inputmanager
@@ -1492,6 +1505,9 @@ func (d *Device) setHardwareMode() {
 
 // getBatterLevel will return initial battery level
 func (d *Device) getBatterLevel() {
+	if d.Exit {
+		return
+	}
 	batteryLevel, err := d.transfer(cmdBatteryLevel, nil)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to get battery level")
@@ -1853,7 +1869,11 @@ func (d *Device) setKeepAlive() {
 		for {
 			select {
 			case <-d.timerKeepAlive.C:
+				if d.Exit {
+					return
+				}
 				d.keepAlive()
+				d.getBatterLevel()
 			case <-d.keepAliveChan:
 				d.timerKeepAlive.Stop()
 				return
@@ -1934,15 +1954,15 @@ func (d *Device) setDeviceColor() {
 				switch key {
 				case 0: // Red
 					for i := zoneColorIndex; i < 9; i++ {
-						buf[i] = 0x00
+						buf[i] = 0x01
 					}
 				case 1: // Green
 					for i := zoneColorIndex; i < 9*2; i++ {
-						buf[i] = 0x00
+						buf[i] = 0x01
 					}
 				case 2: // Blue
 					for i := zoneColorIndex; i < 9*3; i++ {
-						buf[i] = 0x00
+						buf[i] = 0x01
 					}
 				}
 			}
@@ -1960,15 +1980,15 @@ func (d *Device) setDeviceColor() {
 				switch key {
 				case 0: // Red
 					for i := zoneColorIndex; i < 9; i++ {
-						buf[i] = byte(zoneColor.Color.Red)
+						buf[i] = max(byte(zoneColor.Color.Red), byte(1))
 					}
 				case 1: // Green
 					for i := zoneColorIndex; i < 9*2; i++ {
-						buf[i] = byte(zoneColor.Color.Green)
+						buf[i] = max(byte(zoneColor.Color.Green), byte(1))
 					}
 				case 2: // Blue
 					for i := zoneColorIndex; i < 9*3; i++ {
-						buf[i] = byte(zoneColor.Color.Blue)
+						buf[i] = max(byte(zoneColor.Color.Blue), byte(1))
 					}
 				}
 			}
@@ -1991,15 +2011,15 @@ func (d *Device) setDeviceColor() {
 				switch key {
 				case 0: // Red
 					for i := zoneColorIndex; i < 9; i++ {
-						buf[i] = byte(profileColor.Red)
+						buf[i] = max(byte(profileColor.Red), byte(1))
 					}
 				case 1: // Green
 					for i := zoneColorIndex; i < 9*2; i++ {
-						buf[i] = byte(profileColor.Green)
+						buf[i] = max(byte(profileColor.Green), byte(1))
 					}
 				case 2: // Blue
 					for i := zoneColorIndex; i < 9*3; i++ {
-						buf[i] = byte(profileColor.Blue)
+						buf[i] = max(byte(profileColor.Blue), byte(1))
 					}
 				}
 			}
@@ -2026,7 +2046,7 @@ func (d *Device) setDeviceColor() {
 				profile := d.GetRgbProfile(d.DeviceProfile.RGBProfile)
 				if profile == nil {
 					for i := 0; i < d.ChangeableLedChannels*3; i++ {
-						buff = append(buff, []byte{0, 0, 0}...)
+						buff = append(buff, []byte{1, 1, 1}...)
 					}
 					continue
 				}
@@ -2072,7 +2092,7 @@ func (d *Device) setDeviceColor() {
 				case "off":
 					{
 						for n := 0; n < d.ChangeableLedChannels; n++ {
-							buff = append(buff, []byte{0, 0, 0}...)
+							buff = append(buff, []byte{1, 1, 1}...)
 						}
 					}
 				case "rainbow":
@@ -2166,25 +2186,10 @@ func (d *Device) setDeviceColor() {
 					}
 				}
 
-				for _, zoneColor := range d.DeviceProfile.ZoneColors {
-					zoneColorIndexRange := zoneColor.ColorIndex
-
-					for key, zoneColorIndex := range zoneColorIndexRange {
-						switch key {
-						case 0: // Red
-							for i := zoneColorIndex; i < 9; i++ {
-								buf[i] = buff[i]
-							}
-						case 1: // Green
-							for i := zoneColorIndex; i < 9*2; i++ {
-								buf[i] = buff[i]
-							}
-						case 2: // Blue
-							for i := zoneColorIndex; i < 9*3; i++ {
-								buf[i] = buff[i]
-							}
-						}
-					}
+				for i := 0; i < d.ChangeableLedChannels; i++ {
+					buf[i] = max(buff[i*3], byte(1))
+					buf[d.ChangeableLedChannels+i] = max(buff[i*3+1], byte(1))
+					buf[(d.ChangeableLedChannels*2)+i] = max(buff[i*3+2], byte(1))
 				}
 
 				d.writeColor(buf)
@@ -2453,6 +2458,7 @@ func (d *Device) backendListener() {
 
 				data := d.getListenerData()
 				if len(data) == 0 || data == nil {
+					time.Sleep(5 * time.Millisecond)
 					continue
 				}
 

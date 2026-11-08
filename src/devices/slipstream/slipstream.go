@@ -10,6 +10,7 @@ import (
 	"OpenLinkHub/src/devices/darkcorergbproW"
 	"OpenLinkHub/src/devices/darkcorergbproseW"
 	"OpenLinkHub/src/devices/darkstarW"
+	"OpenLinkHub/src/devices/harpoonV2W"
 	"OpenLinkHub/src/devices/harpoonW"
 	"OpenLinkHub/src/devices/ironclawSEW"
 	"OpenLinkHub/src/devices/ironclawW"
@@ -27,6 +28,7 @@ import (
 	"OpenLinkHub/src/devices/scimitarSEW"
 	"OpenLinkHub/src/devices/scimitarW"
 	"OpenLinkHub/src/logger"
+	"OpenLinkHub/src/stats"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -58,7 +60,7 @@ type Device struct {
 	VendorId       uint16
 	Devices        map[int]*Devices `json:"devices"`
 	PairedDevices  map[uint16]any
-	SharedDevices  func(device *common.Device)
+	SharedDevices  func(device *common.Device) `json:"-"`
 	DeviceList     map[string]*common.Device
 	DeviceProfile  *DeviceProfile
 	SingleDevice   bool
@@ -485,6 +487,30 @@ func (d *Device) addDevices() {
 				object := &common.Device{
 					ProductType: common.ProductTypeHarpoonRgbW,
 					Product:     "HARPOON RGB",
+					Serial:      dev.Serial,
+					Firmware:    dev.Firmware,
+					Image:       "icon-mouse.svg",
+					Instance:    dev,
+					DeviceType:  common.DeviceTypeMouse,
+					ProductId:   value.ProductId,
+				}
+				d.SharedDevices(object)
+				d.AddPairedDevice(value.ProductId, dev, object)
+			}
+		case 11054: // HARPOON V2 WIRELESS
+			{
+				dev := harpoonV2W.Init(
+					value.VendorId,
+					d.ProductId,
+					value.ProductId,
+					d.slipstream,
+					value.Endpoint,
+					value.Serial,
+				)
+
+				object := &common.Device{
+					ProductType: common.ProductTypeHarpoonV2W,
+					Product:     "HARPOON V2",
 					Serial:      dev.Serial,
 					Firmware:    dev.Firmware,
 					Image:       "icon-mouse.svg",
@@ -1062,11 +1088,14 @@ func (d *Device) setDeviceStatus(status byte, productId uint16) {
 					reflectArgs[0] = reflect.ValueOf(false)
 					setConnected.Call(reflectArgs)
 					d.slipstream.Connected[v.ProductId] = false
+					stats.UpdateDeviceConnectionStatus(v.Serial, false)
 				case 0x02:
 					go func() {
 						time.Sleep(time.Duration(connectDelay) * time.Millisecond)
 						connect.Call(nil)
 						d.slipstream.Connected[v.ProductId] = true
+						d.SharedDevices(d.DeviceList[v.Serial])
+						stats.UpdateBatteryChargeStatus(v.Serial, 0)
 					}()
 				}
 			}
@@ -1091,6 +1120,7 @@ func (d *Device) setDeviceStatus(status byte, productId uint16) {
 						reflectArgs[0] = reflect.ValueOf(false)
 						setConnected.Call(reflectArgs)
 						d.slipstream.Connected[val.ProductId] = false
+						stats.UpdateDeviceConnectionStatus(val.Serial, false)
 					case 0x02:
 						//
 					case 0x04:
@@ -1099,12 +1129,15 @@ func (d *Device) setDeviceStatus(status byte, productId uint16) {
 								time.Sleep(time.Duration(connectDelay) * time.Millisecond)
 								connect.Call(nil)
 								d.slipstream.Connected[val.ProductId] = true
+								d.SharedDevices(d.DeviceList[v.Serial])
+								stats.UpdateBatteryChargeStatus(val.Serial, 0)
 							}()
 						} else {
 							reflectArgs := make([]reflect.Value, 1)
 							reflectArgs[0] = reflect.ValueOf(false)
 							setConnected.Call(reflectArgs)
 							d.slipstream.Connected[val.ProductId] = false
+							stats.UpdateDeviceConnectionStatus(val.Serial, false)
 						}
 					case 0x08:
 						if val.DeviceType == common.DeviceTypeKeyboard {
@@ -1112,18 +1145,23 @@ func (d *Device) setDeviceStatus(status byte, productId uint16) {
 								time.Sleep(time.Duration(connectDelay) * time.Millisecond)
 								connect.Call(nil)
 								d.slipstream.Connected[val.ProductId] = true
+								d.SharedDevices(d.DeviceList[v.Serial])
+								stats.UpdateBatteryChargeStatus(val.Serial, 0)
 							}()
 						} else {
 							reflectArgs := make([]reflect.Value, 1)
 							reflectArgs[0] = reflect.ValueOf(false)
 							setConnected.Call(reflectArgs)
 							d.slipstream.Connected[val.ProductId] = false
+							stats.UpdateDeviceConnectionStatus(val.Serial, false)
 						}
 					case 0x0c:
 						go func() {
 							time.Sleep(time.Duration(connectDelay) * time.Millisecond)
 							connect.Call(nil)
 							d.slipstream.Connected[val.ProductId] = true
+							d.SharedDevices(d.DeviceList[v.Serial])
+							stats.UpdateBatteryChargeStatus(val.Serial, 0)
 						}()
 					}
 				}
@@ -1254,6 +1292,9 @@ func (d *Device) sleepMonitor() {
 // getListenerData will listen for keyboard events and return data on success or nil on failure.
 // ReadWithTimeout is mandatory due to the nature of listening for events
 func (d *Device) getListenerData() []byte {
+	if d.slipstream.Listener == nil {
+		return nil
+	}
 	data := make([]byte, bufferSize)
 	n, err := d.slipstream.Listener.ReadWithTimeout(data, 100*time.Millisecond)
 	if err != nil || n == 0 {
@@ -1335,6 +1376,17 @@ func (d *Device) TriggerMousedKeyAssignment(data []byte) {
 	}
 }
 
+// setDeviceChargeStatus will set device charge status
+func (d *Device) setDeviceChargeStatus(mode, status byte) {
+	if mode == 1 {
+		for _, val := range d.DeviceList {
+			if _, ok := d.PairedDevices[val.ProductId]; ok {
+				stats.UpdateBatteryChargeStatus(val.Serial, status)
+			}
+		}
+	}
+}
+
 // backendListener will listen for events from the device
 func (d *Device) backendListener() {
 	go func() {
@@ -1354,6 +1406,11 @@ func (d *Device) backendListener() {
 			logger.Log(logger.Fields{"error": err, "vendorId": d.VendorId}).Error("Unable to enumerate devices")
 		}
 
+		if d.slipstream.Listener == nil {
+			logger.Log(logger.Fields{"serial": d.Serial}).Error("Unable to open device listener")
+			return
+		}
+
 		// Listen loop
 		for {
 			select {
@@ -1369,7 +1426,14 @@ func (d *Device) backendListener() {
 
 				data := d.getListenerData()
 				if len(data) == 0 || data == nil {
+					time.Sleep(5 * time.Millisecond)
 					continue
+				}
+
+				if data[2] == 0x10 {
+					chargeStatus := data[4]
+					chargeMode := data[0]
+					d.setDeviceChargeStatus(chargeMode, chargeStatus)
 				}
 
 				if d.Debug {

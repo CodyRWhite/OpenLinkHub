@@ -1,0 +1,18 @@
+{{ define "xeneon-temperature-history" }}
+{{ $root := .Root }}
+{{ $widget := .WidgetArea.Widget }}
+<div class="edge-panel xeneon-extra" id="xeneon-temperature-history" style="--widget-text: {{ $widget.TextColor }}; --widget-subtext: {{ $widget.SubTextColor }}; --widget-accent: {{ $widget.DataColor }}; --widget-font-size: {{ $widget.FontSize }}px; --widget-subfont-size: {{ $widget.SubFontSize }}px;" data-device-id="{{ $widget.DeviceId }}" data-channel-id="{{ $widget.ChannelId }}" data-source="{{ $widget.Source }}" data-history-minutes="{{ $widget.HistoryMinutes }}" data-max="{{ $widget.Max }}" data-temperature-unit="{{ $widget.Unit }}">
+    <div class="card system-card">
+        <div class="card-body">
+            <div class="xeneon-extra-heading">{{ $widget.HeaderText }}</div>
+            <div class="xeneon-history-summary"><span class="xeneon-history-value">--</span><span class="xeneon-history-unit">{{ $widget.Unit }}</span></div>
+            <svg class="xeneon-history-chart" viewBox="0 0 600 140" preserveAspectRatio="none" aria-label="{{ $widget.HeaderText }}" role="img">
+                <path class="xeneon-history-grid" d="M0 1H600 M0 70H600 M0 139H600"></path>
+                <path class="xeneon-history-fill"></path><path class="xeneon-history-line"></path>
+            </svg>
+            <div class="xeneon-history-axis"><span>{{ $widget.HistoryMinutes }} {{ $root.Lang "txtXeneonMinutesAgo" }}</span><span>{{ $root.Lang "txtXeneonNow" }}</span></div>
+            <div class="xeneon-history-range"><span>{{ $root.Lang "txtXeneonMin" }} <b class="history-min">--</b></span><span>{{ $root.Lang "txtXeneonMax" }} <b class="history-max">--</b></span></div>
+        </div>
+    </div>
+</div>
+{{ end }}

@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"OpenLinkHub/src/appmonitor"
 	"github.com/sstallion/go-hid"
 )
 
@@ -242,6 +243,7 @@ func Init(vendorId, productId uint16, _, path string) *common.Device {
 			9:  "Mouse",
 			10: "Macro",
 			11: "Profile Switch",
+			23: "Global Profile",
 		},
 		InputActions:      inputmanager.GetInputActions(),
 		keyAssignmentFile: "/database/key-assignments/m75.json",
@@ -1375,6 +1377,7 @@ func (d *Device) UpdateDeviceKeyAssignment(keyIndex int, keyAssignment inputmana
 		val.ActionCommand = keyAssignment.ActionCommand
 		val.IsMacro = keyAssignment.IsMacro
 		val.OnRelease = keyAssignment.OnRelease
+		val.DeviceId = keyAssignment.DeviceId
 		d.KeyAssignment[keyIndex] = val
 		d.saveKeyAssignments()
 		d.setupKeyAssignment()
@@ -2201,6 +2204,9 @@ func (d *Device) triggerKeyAssignment(value byte) {
 			case 11:
 				d.rotateDeviceProfile()
 				break
+			case 23:
+				appmonitor.ManualApplicationProfileChange(val.DeviceId)
+				break
 			}
 		}
 	}
@@ -2389,6 +2395,9 @@ func (d *Device) transfer(endpoint, buffer []byte) ([]byte, error) {
 // getListenerData will listen for keyboard events and return data on success or nil on failure.
 // ReadWithTimeout is mandatory due to the nature of listening for events
 func (d *Device) getListenerData() []byte {
+	if d.listener == nil {
+		return nil
+	}
 	data := make([]byte, bufferSize)
 	n, err := d.listener.ReadWithTimeout(data, 100*time.Millisecond)
 	if err != nil || n == 0 {
@@ -2416,6 +2425,11 @@ func (d *Device) backendListener() {
 			logger.Log(logger.Fields{"error": err, "vendorId": d.VendorId}).Error("Unable to enumerate devices")
 		}
 
+		if d.listener == nil {
+			logger.Log(logger.Fields{"serial": d.Serial}).Error("Unable to open device listener")
+			return
+		}
+
 		for {
 			select {
 			default:
@@ -2430,6 +2444,7 @@ func (d *Device) backendListener() {
 
 				data := d.getListenerData()
 				if len(data) == 0 || data == nil {
+					time.Sleep(5 * time.Millisecond)
 					continue
 				}
 

@@ -82,6 +82,18 @@
                                         </label>
                                     </div>
 
+                                    <!-- Hardware Lights -->
+                                    <div class="settings-row">
+                                        <span class="settings-label text-ellipsis">{{ .Lang "txtHardwareLights" }}</span>
+                                        <label for="hardwareLights">
+                                            <select id="hardwareLights" class="form-select system-select compact auto-width hardwareLights" name="hardwareLights">
+                                                {{ range $key, $value := $device.HardwareModes }}
+                                                <option value="{{ $key }}" {{ if eq $key $deviceProfile.HardwareMode }} selected {{ end }}>{{ $value }}</option>
+                                                {{ end }}
+                                            </select>
+                                        </label>
+                                    </div>
+
                                     <!-- Delete user profile -->
                                     <div class="settings-row">
                                         <span class="settings-label text-ellipsis">{{ .Lang "txtDeleteProfile" }}</span>
@@ -135,6 +147,14 @@
                                                 <option value="{{ $key }}" {{ if eq $key $hub.ExternalHubDeviceAmount }} selected {{ end }}>{{ $externalLedDeviceAmount }}</option>
                                                 {{ end }}
                                             </select>
+                                            <input type="hidden" class="portId" value="{{ $hub.PortId }}">
+                                        </label>
+                                    </div>
+
+                                    <div class="settings-row" {{ if ne $hub.ExternalHubDeviceType 999 }}style="display:none;"{{ end }}>
+                                        <span class="settings-label text-ellipsis">LED Count</span>
+                                        <label class="externalHubDevice">
+                                            <input type="number" min="0" max="204" id="customLedCount{{ $hub.PortId }}" class="form-select system-select compact max-width-120 customLedCount" value="{{ $hub.CustomLedCount }}">
                                             <input type="hidden" class="portId" value="{{ $hub.PortId }}">
                                         </label>
                                     </div>

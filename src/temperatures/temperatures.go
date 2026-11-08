@@ -365,6 +365,24 @@ func upgradeGraphProfiles() {
 	}
 }
 
+// GetSupportedTemperatureSensors returns all supported temperature sensors
+func GetSupportedTemperatureSensors() interface{} {
+	return map[int]string{
+		0:  "CPU",
+		1:  "GPU",
+		2:  "Liquid Temperature (AIO)",
+		3:  "Storage Temperature",
+		4:  "Temperature Probe",
+		5:  "CPU + GPU",
+		6:  "External HWMON",
+		7:  "External binary",
+		8:  "Multi GPU",
+		9:  "Global Temperature Probe",
+		10: "PSU",
+		11: "Multi GPUs",
+	}
+}
+
 // SetMemoryTemperature will update memory temperature
 func SetMemoryTemperature(channelId int, temperature float32) {
 	memoryTemperature[channelId] = MemoryTemperatures{
@@ -803,7 +821,12 @@ func GetNVIDIAGpuTemperature(gpuIndex int) float32 {
 	// Convert temperature to an integer
 	temp, err := strconv.Atoi(tempStr)
 	if err != nil {
-		return 0
+		// Since 620.70.06 nvidia-smi prints a decimal value (e.g. 43.90) instead of an integer.
+		value, err := strconv.ParseFloat(tempStr, 32)
+		if err != nil {
+			return 0
+		}
+		return float32(value)
 	}
 
 	return float32(temp)
