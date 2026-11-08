@@ -10,6 +10,8 @@
     {{ $device := .Device }}
     {{ $devices := $device.Devices }}
     {{ $deviceProfile := .Device.DeviceProfile }}
+    {{ $rgbDevices := $device.RgbDevices }}
+    {{ $rgbModes := $device.RGBModes }}
     <input type="hidden" id="deviceId" name="deviceId" value="{{ $device.Serial }}">
     <input type="hidden" id="selectedDevices" name="selectedDevices" value="">
     <div class="row">
@@ -134,6 +136,56 @@
                                                     <option value="{{ $device.ChannelId }};{{ $key }}" {{ if eq $device.HeaderMode $key }} selected {{ end }}>{{ $om }}</option>
                                                     {{ end }}
                                                 </select>
+                                            </label>
+                                        </div>
+                                        {{ end }}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        {{ end }}
+
+                        <!-- RGB (single combined card: profile + brightness + override) -->
+                        {{ range $rgbDevice := $rgbDevices }}
+                        <div class="col-md-2">
+                            <div class="card system-card text-center device-selectable" data-info="{{ $rgbDevice.ChannelId }}">
+                                <div class="card-header header-split">
+                                    <span class="header-left">
+                                        {{ $rgbDevice.Label }}
+                                    </span>
+                                    <span class="header-right">RGB</span>
+                                </div>
+                                <div class="card-body">
+                                    <div class="settings-list">
+                                        {{ if gt $rgbDevice.LedChannels 0 }}
+                                        <!-- RGB -->
+                                        <div class="settings-row">
+                                            <span class="settings-label text-ellipsis">{{ $root.Lang "txtRgb" }}</span>
+                                            <label>
+                                                <select class="form-select system-select compact auto-width rgbProfile" name="{{ $rgbDevice.ChannelId }}">
+                                                    {{ range $key, $mode := $rgbModes }}
+                                                    <option value="{{ $rgbDevice.ChannelId }};{{ $mode }}" {{ if eq $mode $rgbDevice.RGB }} selected{{ end }}>{{ $mode }}</option>
+                                                    {{ end }}
+                                                </select>
+                                            </label>
+                                        </div>
+
+                                        <!-- Brightness -->
+                                        <div class="settings-row">
+                                            <span class="settings-label text-ellipsis">{{ $root.Lang "txtBrightness" }}</span>
+                                            <div class="system-slider no-padding-top">
+                                                <label for="brightnessSlider">
+                                                    <input type="range" id="brightnessSlider" name="brightnessSlider" min="0" max="100" value="{{ $deviceProfile.BrightnessSlider }}" step="1">
+                                                </label>
+                                                <div class="slider-value" id="brightnessSliderValue">{{ $deviceProfile.BrightnessSlider }} %</div>
+                                            </div>
+                                        </div>
+
+                                        <!-- RGB Override -->
+                                        <div class="settings-row">
+                                            <span class="settings-label text-ellipsis">{{ $root.Lang "txtRgbOverride" }}</span>
+                                            <label>
+                                                <button class="system-button compact rgbOverride" data-info="{{ $rgbDevice.ChannelId }}" type="button">{{ $root.Lang "txtConfigure" }}</button>
                                             </label>
                                         </div>
                                         {{ end }}

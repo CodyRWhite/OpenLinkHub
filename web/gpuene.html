@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+{{ template "head" . }}
+<body>
+
+<div class="container-fluid">
+    {{ $root := . }}
+    {{ $device := .Device }}
+    {{ $rgbModes := .Device.RGBModes }}
+    {{ $rgbDevices := $device.RgbDevices }}
+    {{ $deviceProfile := $device.DeviceProfile }}
+    <input type="hidden" id="deviceId" name="deviceId" value="{{ $device.Serial }}">
+    <div class="row">
+        <!-- Sidebar -->
+        {{ template "sidebar" . }}
+
+        <!-- Main -->
+        <main class="main-content p-4">
+            <!-- Temperature bar -->
+            {{ if .Dashboard.TemperatureBar }}
+            {{ template "temperature-bar" . }}
+            {{ end }}
+
+            <!-- RGB / Settings (single combined card: speed + brightness + profile + override) -->
+            <div class="row g-4 mb-4 align-items-start">
+                {{ range $device := $rgbDevices }}
+                <div class="col-md-2">
+                    <div class="card system-card device-selectable" data-info="{{ $device.ChannelId }}">
+                        <div class="card-header header-split">
+                            <span class="header-left">
+                                {{ $root.Device.Product }}
+                            </span>
+                            <input type="hidden" class="deviceData" value="{{ $device.ChannelId }}">
+                            <span class="header-right newRgbLabel">
+                                <input type="hidden" class="deviceData" value="{{ $device.ChannelId }}">
+                                <span class="labelValue">{{ $device.Label }}</span>
+                            </span>
+                        </div>
+                        <div class="card-body">
+                            <div class="settings-list">
+                                <!-- Speed -->
+                                <div class="settings-row">
+                                    <span class="settings-label text-ellipsis">{{ $root.Lang "txtSpeed" }}</span>
+                                    <span class="meta-value">{{ $root.Device.GetFanSpeed }} %</span>
+                                </div>
+
+                                <!-- Brightness -->
+                                <div class="settings-row">
+                                    <span class="settings-label text-ellipsis">{{ $root.Lang "txtBrightness" }}</span>
+                                    <div class="system-slider no-padding-top">
+                                        <label for="brightnessSlider">
+                                            <input type="range" id="brightnessSlider" name="brightnessSlider" min="0" max="100" value="{{ $deviceProfile.BrightnessSlider }}" step="1">
+                                        </label>
+                                        <div class="slider-value" id="brightnessSliderValue">{{ $deviceProfile.BrightnessSlider }} %</div>
+                                    </div>
+                                </div>
+
+                                {{ if gt $device.LedChannels 0 }}
+                                <!-- RGB -->
+                                <div class="settings-row">
+                                    <span class="settings-label text-ellipsis">{{ $root.Lang "txtRgb" }}</span>
+                                    <label>
+                                        <select class="form-select system-select compact auto-width rgbProfile" name="{{ $device.ChannelId }}">
+                                            {{ range $key, $mode := $rgbModes }}
+                                            <option value="{{ $device.ChannelId }};{{ $mode }}" {{ if eq $mode $device.RGB }} selected{{ end }}>{{ $mode }}</option>
+                                            {{ end }}
+                                        </select>
+                                    </label>
+                                </div>
+
+                                <!-- RGB Override -->
+                                <div class="settings-row">
+                                    <span class="settings-label text-ellipsis">{{ $root.Lang "txtRgbOverride" }}</span>
+                                    <label>
+                                        <button class="system-button compact rgbOverride" data-info="{{ $device.ChannelId }}" type="button">{{ $root.Lang "txtConfigure" }}</button>
+                                    </label>
+                                </div>
+                                {{ end }}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {{ end }}
+            </div>
+        </main>
+    </div>
+</div>
+<script src="/static/js/overview.js"></script>
+<script src="/static/js/sidebar.js"></script>
+{{ if .Dashboard.TemperatureBar }}
+<script src="/static/js/temperature-bar.js"></script>
+{{ end }}
+</body>
+</html>
