@@ -11,6 +11,7 @@ import (
 	"OpenLinkHub/src/logger"
 	"OpenLinkHub/src/metrics"
 	"OpenLinkHub/src/motherboards"
+	"OpenLinkHub/src/rgb"
 	"OpenLinkHub/src/stats"
 	"OpenLinkHub/src/temperatures"
 	"encoding/json"
@@ -22,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sstallion/go-hid"
 )
 
 var (
@@ -32,15 +35,20 @@ var (
 )
 
 type DeviceProfile struct {
-	Active        bool
-	Path          string
-	Product       string
-	Serial        string
-	SpeedProfiles map[int]string
-	HeaderModes   map[int]int
-	Labels        map[int]string
-	MultiProfile  string
-	RgbOff        bool
+	Active           bool
+	Path             string
+	Product          string
+	Serial           string
+	SpeedProfiles    map[int]string
+	HeaderModes      map[int]int
+	Labels           map[int]string
+	MultiProfile     string
+	RgbOff           bool
+	Brightness       uint8
+	BrightnessSlider *uint8
+	RGBProfile       string
+	RGBLabel         string
+	RGBOverride      map[int]map[int]RGBOverride
 }
 
 type TemperatureProbe struct {
@@ -108,6 +116,13 @@ type Device struct {
 	Exit              bool
 	deviceLock        sync.Mutex
 	instance          *common.Device
+	auraDev           *hid.Device
+	LedCount          uint8
+	RgbDevices        map[int]*RgbDevice
+	Rgb               *rgb.RGB
+	RGBModes          []string
+	activeRgb         *rgb.ActiveRGB
+	auraDevLock       sync.Mutex
 }
 
 // Init will initialize a new device
@@ -145,6 +160,7 @@ func Init() *common.Device {
 	d.setPwmMode()         // Set PWM mode
 	d.setDefaults()        // Set default speed and color values for fans and pumps
 	d.setAutoRefresh()     // Set auto device refresh
+	d.initAuraRgb()        // ASUS Aura USB RGB (ROG logo), if present
 	d.saveDeviceProfile()  // Save profile
 	if config.GetConfig().Manual {
 		fmt.Println(
@@ -195,6 +211,8 @@ func (d *Device) Stop() {
 	if config.GetConfig().MotherboardBiosOnExit {
 		d.setBiosMode()
 	}
+
+	d.stopAuraRgb()
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Device stopped")
 }
 
@@ -222,6 +240,8 @@ func (d *Device) StopDirty() uint8 {
 	if config.GetConfig().MotherboardBiosOnExit {
 		d.setBiosMode()
 	}
+
+	d.stopAuraRgb()
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Device stopped")
 	return 1
 }
@@ -670,6 +690,12 @@ func (d *Device) saveDeviceProfile() {
 			labels[device.ChannelId] = "Set Label"
 		}
 		deviceProfile.Active = true
+		brightness := uint8(100)
+		deviceProfile.Brightness = 1
+		deviceProfile.BrightnessSlider = &brightness
+		deviceProfile.RGBProfile = "static"
+		deviceProfile.RGBLabel = "Motherboard"
+		deviceProfile.RGBOverride = defaultRgbOverride()
 	} else {
 		deviceProfile.Active = d.DeviceProfile.Active
 		deviceProfile.MultiProfile = d.DeviceProfile.MultiProfile
@@ -680,6 +706,15 @@ func (d *Device) saveDeviceProfile() {
 			deviceProfile.Path = d.DeviceProfile.Path
 		}
 		deviceProfile.RgbOff = d.DeviceProfile.RgbOff
+		deviceProfile.Brightness = d.DeviceProfile.Brightness
+		deviceProfile.BrightnessSlider = d.DeviceProfile.BrightnessSlider
+		deviceProfile.RGBLabel = d.DeviceProfile.RGBLabel
+		deviceProfile.RGBOverride = d.DeviceProfile.RGBOverride
+		if d.RgbDevices != nil && d.RgbDevices[0] != nil {
+			deviceProfile.RGBProfile = d.RgbDevices[0].RGB
+		} else {
+			deviceProfile.RGBProfile = d.DeviceProfile.RGBProfile
+		}
 	}
 
 	d.DeviceProfile = deviceProfile
