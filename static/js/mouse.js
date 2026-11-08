@@ -17,6 +17,48 @@ document.addEventListener("DOMContentLoaded", function () {
         } : null;
     }
 
+    $.ajax({
+        url: '/api/devices/' + $("#deviceId").val(),
+        type: 'get',
+        success: function (result) {
+            const keyAssignments = result.device.KeyAssignment;
+
+            $('.keyAssignmentType').each(function () {
+                if (parseInt($(this).val()) !== 23) {
+                    return;
+                }
+
+                const keyIndex = $(this).attr('id').split('_')[1];
+                const keyAssignmentValue = $('#keyAssignmentValue_' + keyIndex);
+                const assignment = keyAssignments[keyIndex];
+
+                if (assignment) {
+                    loadGlobalProfiles(keyAssignmentValue, assignment.deviceId);
+                }
+            });
+        }
+    });
+
+    function loadGlobalProfiles(keyAssignmentValue, selectedValue = null) {
+        $.ajax({
+            url: '/api/application/manualProfiles',
+            type: 'get',
+            success: function (result) {
+                keyAssignmentValue.empty();
+                $.each(result.data, function (index, value) {
+                    keyAssignmentValue.append($('<option>', {
+                        value: index,
+                        text: value.applicationName,
+                        selected: index === selectedValue
+                    }));
+                });
+            },
+            error: function () {
+                toast.warning("Unable to load global profiles");
+            }
+        });
+    }
+
     $('#defaultDPI').on('click', function () {
         for (let i = 0; i <= dpiStageAmount; i++) {
             const stage = document.getElementById("stage" + i);
@@ -463,6 +505,11 @@ document.addEventListener("DOMContentLoaded", function () {
                 });
             }
             break;
+
+            case 23: { // Global Profile
+                loadGlobalProfiles(keyAssignmentValue);
+            }
+            break;
         }
     });
 
@@ -490,8 +537,10 @@ document.addEventListener("DOMContentLoaded", function () {
             enabled: enabled,
             pressAndHold: pressAndHold,
             keyAssignmentType: parseInt(keyAssignmentType),
-            keyAssignmentValue: parseInt(keyAssignmentValue),
-            onRelease: onRelease
+            onRelease: onRelease,
+            ...(parseInt(keyAssignmentType) === 23
+                ? { keyAssignmentValueString: keyAssignmentValue }
+                : { keyAssignmentValue: parseInt(keyAssignmentValue) })
         };
 
         $.ajax({

@@ -27,39 +27,42 @@ var (
 )
 
 type Web struct {
-	Title             string
-	Tpl               *template.Template
-	Devices           map[string]*common.Device
-	Configuration     config.Configuration
-	Device            interface{}
-	Lcd               interface{}
-	LCDImages         interface{}
-	TemperatureProbes interface{}
-	HwMonSensors      interface{}
-	RGBProfiles       map[string]interface{}
-	Temperatures      map[string]temperatures.TemperatureProfileData
-	Macros            map[int]macro.Macro
-	LCDProfiles       map[uint8]interface{}
-	LCDSensors        map[uint8]string
-	InputActions      map[uint16]inputmanager.InputAction
-	Scheduler         scheduler.Scheduler
-	Rgb               map[string]rgb.Profile
-	SystemInfo        interface{}
-	Stats             interface{}
-	AudioSettings     interface{}
-	OutputDevices     interface{}
-	Displays          interface{}
-	CpuTemp           string
-	GpuTemp           string
-	Page              string
-	SystemService     bool
-	StorageTemp       []temperatures.StorageTemperatures
-	BuildInfo         *version.BuildInfo
-	Dashboard         dashboard.Dashboard
-	Languages         map[string]language.Language
-	LanguageCode      string
-	BatteryStats      interface{}
-	RGBModes          []string
+	Title               string
+	Tpl                 *template.Template
+	Devices             map[string]*common.Device
+	Configuration       config.Configuration
+	Device              interface{}
+	Lcd                 interface{}
+	LCDImages           interface{}
+	TemperatureProbes   interface{}
+	HwMonSensors        interface{}
+	RGBProfiles         map[string]interface{}
+	Temperatures        map[string]temperatures.TemperatureProfileData
+	Macros              map[int]macro.Macro
+	LCDProfiles         map[uint8]interface{}
+	LCDSensors          map[uint8]string
+	InputActions        map[uint16]inputmanager.InputAction
+	Scheduler           scheduler.Scheduler
+	Rgb                 map[string]rgb.Profile
+	SystemInfo          interface{}
+	Stats               interface{}
+	AudioSettings       interface{}
+	OutputDevices       interface{}
+	Displays            interface{}
+	CpuTemp             string
+	GpuTemp             string
+	Page                string
+	SystemService       bool
+	StorageTemp         []temperatures.StorageTemperatures
+	BuildInfo           *version.BuildInfo
+	Dashboard           dashboard.Dashboard
+	ApplicationProfiles interface{}
+	Applications        interface{}
+	Languages           map[string]language.Language
+	LanguageCode        string
+	BatteryStats        interface{}
+	RGBModes            []string
+	AppMonitor          bool
 }
 
 // Lang is called from template files
@@ -91,6 +94,11 @@ func (w Web) RenderTemplate(name string, data any) template.HTML {
 		return ""
 	}
 	return template.HTML(buf.String())
+}
+
+// AuthEnabled will return if Auth system is enabled
+func (w Web) AuthEnabled() bool {
+	return dashboard.GetDashboard().AuthEnabled
 }
 
 // Init will parse all templates

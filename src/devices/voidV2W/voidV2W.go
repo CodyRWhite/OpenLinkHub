@@ -115,6 +115,7 @@ var (
 	cmdOpenWriteEndpoint      = []byte{0x0d, 0x01, 0x02}
 	cmdSleep                  = []byte{0x01, 0x0e, 0x00}
 	cmdBatteryLevel           = []byte{0x02, 0x0f}
+	cmdBatteryCharge          = []byte{0x02, 0x10}
 	cmdMicStatus              = []byte{0x02, 0xa6}
 	dataTypeSetColor          = []byte{0x12, 0x00}
 	cmdCloseEndpoint          = []byte{0x05, 0x01, 0x01}
@@ -152,6 +153,10 @@ var (
 func Init(vendorId, slipstreamId, productId uint16, dev *hid.Device, endpoint byte, serial string) *Device {
 	// Set global working directory
 	pwd = config.GetConfig().ConfigPath
+	product := "VOID WIRELESS V2"
+	if productId == 10759 {
+		product = "VOID MAX WIRELESS V2"
+	}
 
 	// Init new struct with HID device
 	d := &Device{
@@ -169,7 +174,7 @@ func Init(vendorId, slipstreamId, productId uint16, dev *hid.Device, endpoint by
 			2: "66 %",
 			3: "100 %",
 		},
-		Product: "VOID WIRELESS V2",
+		Product: product,
 		SleepModes: map[int]string{
 			1:  "1 minute",
 			5:  "5 minutes",
@@ -196,6 +201,17 @@ func Init(vendorId, slipstreamId, productId uint16, dev *hid.Device, endpoint by
 	d.loadDeviceProfiles() // Load all device profiles
 	d.saveDeviceProfile()  // Save profile
 	return d
+}
+
+// updateStats will update device stats
+func (d *Device) updateStats() {
+	stats.UpdateDeviceConnectionStatus(d.Serial, d.Connected)
+	batteryCharge, err := d.transfer(cmdBatteryCharge, nil)
+	if err != nil {
+		logger.Log(logger.Fields{"error": err, "serial": d.Serial}).Error("Unable to get battery charge status")
+		return
+	}
+	stats.UpdateBatteryChargeStatus(d.Serial, batteryCharge[4])
 }
 
 // configureHeadset will configure headset sidetone and active noise cancellation
@@ -346,6 +362,7 @@ func (d *Device) Connect() {
 		d.setDeviceColor()    // Device color
 		d.configureHeadset()  // Headset config
 		d.setEqualizer()      // Equalizer
+		d.updateStats()       // Stats
 	}
 }
 
@@ -788,6 +805,9 @@ func (d *Device) setHardwareMode() {
 
 // getBatterLevel will return initial battery level
 func (d *Device) getBatterLevel() {
+	if d.Exit {
+		return
+	}
 	batteryLevel, err := d.transfer(cmdBatteryLevel, nil)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to get battery level")

@@ -5,6 +5,7 @@ package m55W
 // License: GPL-3.0 or later
 
 import (
+	"OpenLinkHub/src/appmonitor"
 	"OpenLinkHub/src/common"
 	"OpenLinkHub/src/config"
 	"OpenLinkHub/src/inputmanager"
@@ -122,6 +123,7 @@ var (
 	cmdAngleSnapping          = []byte{0x01, 0x07, 0x00}
 	cmdButtonOptimization     = []byte{0x01, 0xb0, 0x00}
 	cmdBatteryLevel           = []byte{0x02, 0x0f}
+	cmdBatteryCharge          = []byte{0x02, 0x10}
 	cmdHeartbeat              = []byte{0x12}
 	bufferSize                = 64
 	keyAmount                 = 6
@@ -176,6 +178,7 @@ func Init(vendorId, slipstreamId, productId uint16, dev *common.Slipstream, endp
 			9:  "Mouse",
 			10: "Macro",
 			11: "Profile Switch",
+			23: "Global Profile",
 		},
 		InputActions:      inputmanager.GetInputActions(),
 		keyAssignmentFile: "/database/key-assignments/m55.json",
@@ -192,6 +195,11 @@ func Init(vendorId, slipstreamId, productId uint16, dev *common.Slipstream, endp
 	d.loadKeyAssignments() // Key Assignments
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Device successfully initialized")
 	return d
+}
+
+// updateStats will update device stats
+func (d *Device) updateStats() {
+	stats.UpdateDeviceConnectionStatus(d.Serial, d.Connected)
 }
 
 // GetRgbProfiles will return RGB profiles for a target device
@@ -281,6 +289,7 @@ func (d *Device) Connect() {
 		d.toggleDPI()             // DPI
 		d.setupKeyAssignment()    // Setup key assignments
 		d.setSleepTimer()         // Sleep
+		d.updateStats()           // Stats
 	}
 }
 
@@ -558,6 +567,9 @@ func (d *Device) setHardwareMode() {
 
 // getBatterLevel will return initial battery level
 func (d *Device) getBatterLevel() {
+	if d.Exit {
+		return
+	}
 	batteryLevel, err := d.transfer(cmdBatteryLevel, nil)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to get battery level")
@@ -846,6 +858,7 @@ func (d *Device) UpdateDeviceKeyAssignment(keyIndex int, keyAssignment inputmana
 		val.ActionCommand = keyAssignment.ActionCommand
 		val.IsMacro = keyAssignment.IsMacro
 		val.OnRelease = keyAssignment.OnRelease
+		val.DeviceId = keyAssignment.DeviceId
 		d.KeyAssignment[keyIndex] = val
 		d.saveKeyAssignments()
 		d.setupKeyAssignment()
@@ -1420,6 +1433,9 @@ func (d *Device) TriggerKeyAssignment(value uint32) {
 				break
 			case 11:
 				d.rotateDeviceProfile()
+				break
+			case 23:
+				appmonitor.ManualApplicationProfileChange(val.DeviceId)
 				break
 			}
 		}

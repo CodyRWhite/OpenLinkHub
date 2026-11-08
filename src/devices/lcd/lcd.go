@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 
+	"OpenLinkHub/src/stats"
 	"github.com/golang/freetype"
 	"github.com/golang/freetype/truetype"
 	"github.com/sstallion/go-hid"
@@ -55,15 +56,18 @@ const (
 	DisplayArc            uint8 = 100
 	DisplayDoubleArc      uint8 = 101
 	DisplayAnimation      uint8 = 102
+	DisplayDots           uint8 = 103
+	DisplayFill           uint8 = 104
 )
 
 const (
-	ImageFormatJpg  = 0
-	ImageFormatBmp  = 1
-	ImageFormatWebp = 2
-	ImageFormatGif  = 3
-	SensorDate      = 20
-	SensorTime      = 21
+	ImageFormatJpg         = 0
+	ImageFormatBmp         = 1
+	ImageFormatWebp        = 2
+	ImageFormatGif         = 3
+	SensorTemperatureProbe = 6
+	SensorDate             = 20
+	SensorTime             = 21
 )
 
 var (
@@ -83,18 +87,19 @@ var (
 		3:  "CPU Load",
 		4:  "GPU Load",
 		5:  "Pump RPM",
+		6:  "Temperature Probe",
 		20: "Date",
 		21: "Time",
 	}
 	sensorTextCache = make(map[uint8]string)
 	lcdPresent      = false
+	imageDataMutex  sync.RWMutex
 )
 
 type ImageData struct {
-	Name           string
-	Frames         int
-	Buffer         []Frames          `json:"-"`
-	PalettedFrames []*image.Paletted `json:"-"`
+	Name   string
+	Frames int
+	Buffer []Frames `json:"-"`
 }
 
 type Frames struct {
@@ -105,7 +110,6 @@ type Frames struct {
 type AnimationFrames struct {
 	Delay  float64
 	Canvas *image.RGBA
-	RGBA   *image.RGBA
 }
 type LCD struct {
 	image     image.Image
@@ -185,6 +189,12 @@ func Init() {
 	// Single Arc
 	InitArc()
 
+	// Dots
+	InitDots()
+
+	// Fill
+	InitFill()
+
 	// Double arc
 	InitDoubleArc()
 
@@ -210,13 +220,19 @@ func Reconnect() {
 
 // GetLcdImages will return all lcd images
 func GetLcdImages() []ImageData {
-	return lcd.ImageData
+	imageDataMutex.RLock()
+	defer imageDataMutex.RUnlock()
+
+	return slices.Clone(lcd.ImageData)
 }
 
 // GetLcdImage will return image data based on image name
-func GetLcdImage(image string) *ImageData {
+func GetLcdImage(name string) *ImageData {
+	imageDataMutex.RLock()
+	defer imageDataMutex.RUnlock()
+
 	for _, value := range lcd.ImageData {
-		if value.Name == image {
+		if value.Name == name {
 			return &value
 		}
 	}
@@ -371,6 +387,8 @@ func sensorMaximumValue(sensor uint8) int {
 		return 100
 	case 5:
 		return 5000
+	case 6:
+		return 60
 	default:
 		return 100
 	}
@@ -378,7 +396,7 @@ func sensorMaximumValue(sensor uint8) int {
 
 // isSensorTemperature will check if given sensor is temperature one
 func isSensorTemperature(sensor uint8) bool {
-	if sensor == 0 || sensor == 1 || sensor == 2 {
+	if sensor == 0 || sensor == 1 || sensor == 2 || sensor == 6 {
 		return true
 	}
 	return false
@@ -413,6 +431,111 @@ func interpolateColor(c1, c2 color.RGBA, t float64) color.RGBA {
 		B: uint8(float64(c1.B)*(1-t) + float64(c2.B)*t),
 		A: 255,
 	}
+}
+
+// drawFillField will draw fill based on profile and fraction
+func drawFillField(profile *Fill, fraction float64) *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, imgWidth, imgHeight))
+	background := generateColor(profile.Background)
+	draw.Draw(img, img.Bounds(), image.NewUniform(background), image.Point{}, draw.Src)
+	if math.IsNaN(fraction) || math.IsInf(fraction, 0) {
+		fraction = 0
+	}
+	fraction = math.Max(0, math.Min(1, fraction))
+	radius := float64(imgWidth)/2 - profile.Margin
+	cx, cy := float64(imgWidth)/2, float64(imgHeight)/2
+	level := cy + radius - 2*radius*fraction
+	start, end := generateColor(profile.StartColor), generateColor(profile.EndColor)
+	for y := 0; y < imgHeight; y++ {
+		fade := math.Max(0, math.Min(1, (float64(y)+0.5-level)/32))
+		if fraction == 0 {
+			fade = 0
+		} else if fraction == 1 {
+			fade = 1
+		}
+		fade = fade * fade * (3 - 2*fade)
+		t := math.Max(0, math.Min(1, (cy+radius-float64(y))/(2*radius)))
+		for x := 0; x < imgWidth; x++ {
+			coverage := math.Max(0, math.Min(1, radius-math.Hypot(float64(x)+0.5-cx, float64(y)+0.5-cy))) * fade
+			img.SetRGBA(x, y, color.RGBA{
+				R: uint8(float64(background.R)*(1-coverage) + (float64(start.R)*(1-t)+float64(end.R)*t)*coverage),
+				G: uint8(float64(background.G)*(1-coverage) + (float64(start.G)*(1-t)+float64(end.G)*t)*coverage),
+				B: uint8(float64(background.B)*(1-coverage) + (float64(start.B)*(1-t)+float64(end.B)*t)*coverage),
+				A: 255,
+			})
+		}
+	}
+	return img
+}
+
+// drawDotsField will draw dot field based on profile and fraction
+func drawDotsField(profile *Dots, fraction float64, textBounds ...image.Rectangle) *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, imgWidth, imgHeight))
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: generateColor(profile.Background)}, image.Point{}, draw.Src)
+	if math.IsNaN(fraction) || math.IsInf(fraction, 0) {
+		fraction = 0
+	}
+	fraction = math.Max(0, math.Min(1, fraction))
+	radius := float64(imgWidth)/2 - profile.Margin
+	cx, cy := float64(imgWidth)/2, float64(imgHeight)/2
+	level := cy + radius - 2*radius*fraction
+	start, end := generateColor(profile.StartColor), generateColor(profile.EndColor)
+	const dotRadius = 14.0
+	const spacing = 36.0
+	rowSpacing := spacing * math.Sqrt(3) / 2
+	rows := int(math.Ceil((radius + dotRadius) / rowSpacing))
+	columns := int(math.Ceil((radius + dotRadius) / spacing))
+	for row := -rows; row <= rows; row++ {
+		y := cy + float64(row)*rowSpacing
+		offset := float64((row%2+2)%2) * spacing / 2
+		for column := -columns; column <= columns; column++ {
+			x := cx + float64(column)*spacing + offset
+			if math.Hypot(x-cx, y-cy)-dotRadius >= radius || y < level || fraction == 0 {
+				continue
+			}
+			// Keep the value and unit clear at every fill level.
+			overlaps := false
+			for _, bounds := range textBounds {
+				nearestX := math.Max(float64(bounds.Min.X), math.Min(x, float64(bounds.Max.X)))
+				nearestY := math.Max(float64(bounds.Min.Y), math.Min(y, float64(bounds.Max.Y)))
+				if math.Hypot(x-nearestX, y-nearestY) < dotRadius+4 {
+					overlaps = true
+					break
+				}
+			}
+			if overlaps {
+				continue
+			}
+
+			t := (cy + radius - y) / (2 * radius)
+			c := color.RGBA{R: uint8(float64(start.R)*(1-t) + float64(end.R)*t), G: uint8(float64(start.G)*(1-t) + float64(end.G)*t), B: uint8(float64(start.B)*(1-t) + float64(end.B)*t), A: 255}
+			for py := int(y - dotRadius); py <= int(y+dotRadius); py++ {
+				for px := int(x - dotRadius); px <= int(x+dotRadius); px++ {
+					coverage := math.Max(0, math.Min(1, dotRadius-math.Hypot(float64(px)+0.5-x, float64(py)+0.5-y)))
+					circleCoverage := math.Max(0, math.Min(1, radius-math.Hypot(float64(px)+0.5-cx, float64(py)+0.5-cy)))
+					coverage = math.Min(coverage, circleCoverage)
+					if coverage == 0 {
+						continue
+					}
+					bg := img.RGBAAt(px, py)
+					img.SetRGBA(px, py, color.RGBA{R: uint8(float64(bg.R)*(1-coverage) + float64(c.R)*coverage), G: uint8(float64(bg.G)*(1-coverage) + float64(c.G)*coverage), B: uint8(float64(bg.B)*(1-coverage) + float64(c.B)*coverage), A: 255})
+				}
+			}
+		}
+	}
+	return img
+}
+
+func dotsTextBounds(img *image.RGBA) image.Rectangle {
+	bounds := image.Rectangle{}
+	for y := 0; y < imgHeight; y++ {
+		for x := 0; x < imgWidth; x++ {
+			if img.RGBAAt(x, y).A != 0 {
+				bounds = bounds.Union(image.Rect(x, y, x+1, y+1))
+			}
+		}
+	}
+	return bounds
 }
 
 // PerformImageUpload will handle image upload
@@ -560,13 +683,8 @@ func PerformImageUpload(w http.ResponseWriter, r *http.Request) {
 	loadImage(savePath, spec.format)
 
 	if spec.format == ImageFormatGif {
-		status := LoadAnimation(name)
-		switch status {
-		case 0:
+		if LoadAnimation(name) == 0 {
 			http.Error(w, "Failed to reload animations", http.StatusInternalServerError)
-			return
-		case 2:
-			http.Error(w, "Animation is already loaded", http.StatusConflict)
 			return
 		}
 	}
@@ -585,6 +703,8 @@ func PerformImageUpload(w http.ResponseWriter, r *http.Request) {
 func GetCustomLcdProfiles() map[uint8]interface{} {
 	profiles := make(map[uint8]interface{})
 	profiles[DisplayArc] = GetArc()
+	profiles[DisplayDots] = GetDots()
+	profiles[DisplayFill] = GetFill()
 	profiles[DisplayDoubleArc] = GetDoubleArc()
 	profiles[DisplayAnimation] = GetAnimation()
 	return profiles
@@ -613,11 +733,20 @@ func GenerateDoubleArcScreenImage(values []float32) []byte {
 
 	// Left arc
 	leftArc := doubleRrc.Arcs[0]
+	if int(leftArc.Sensor) >= len(values) {
+		return nil
+	}
 	leftColStart := generateColor(leftArc.StartColor)
 	leftColEnd := generateColor(leftArc.EndColor)
 	leftCenterX := doubleRrc.Margin + outerRadius
 	leftMax := sensorMaximumValue(leftArc.Sensor)
-	leftValue := values[leftArc.Sensor]
+
+	var leftValue float32 = 0.0
+	if leftArc.Sensor == 6 && len(leftArc.DeviceId) > 0 {
+		leftValue = stats.GetDeviceTemperature(leftArc.DeviceId, leftArc.ChannelId)
+	} else {
+		leftValue = values[leftArc.Sensor]
+	}
 	if leftValue > float32(leftMax) {
 		leftValue = float32(leftMax)
 	}
@@ -636,6 +765,10 @@ func GenerateDoubleArcScreenImage(values []float32) []byte {
 		v := dashboard.GetDashboard().TemperatureToString(leftValue)
 		x, y := calculateStringXY(100, v)
 		drawColorString(x, y-80, 100, v, arcImage, leftArc.TextColor)
+	} else if isSpeedTemperature(leftArc.Sensor) {
+		v := fmt.Sprintf("%.0f RPM", leftValue)
+		x, y := calculateStringXY(100, v)
+		drawColorString(x, y-80, 100, v, arcImage, leftArc.TextColor)
 	} else {
 		v := fmt.Sprintf("%.1f %s", leftValue, "%")
 		x, y := calculateStringXY(100, v)
@@ -648,11 +781,20 @@ func GenerateDoubleArcScreenImage(values []float32) []byte {
 
 	// Right Arc
 	rightArc := doubleRrc.Arcs[1]
+	if int(rightArc.Sensor) >= len(values) {
+		return nil
+	}
 	rightColStart := generateColor(rightArc.EndColor) // Reversed
 	rightColEnd := generateColor(rightArc.StartColor) // Reversed
 	rightCenterX := float64(imgWidth) - doubleRrc.Margin - outerRadius
 	rightMax := sensorMaximumValue(rightArc.Sensor)
-	rightValue := values[rightArc.Sensor]
+
+	var rightValue float32 = 0.0
+	if rightArc.Sensor == 6 && len(rightArc.DeviceId) > 0 {
+		rightValue = stats.GetDeviceTemperature(rightArc.DeviceId, rightArc.ChannelId)
+	} else {
+		rightValue = values[rightArc.Sensor]
+	}
 	if rightValue > float32(rightMax) {
 		rightValue = float32(rightMax)
 	}
@@ -669,6 +811,10 @@ func GenerateDoubleArcScreenImage(values []float32) []byte {
 	// Text
 	if isSensorTemperature(rightArc.Sensor) {
 		v := dashboard.GetDashboard().TemperatureToString(rightValue)
+		x, y = calculateStringXY(100, v)
+		drawColorString(x, y+80, 100, v, arcImage, rightArc.TextColor)
+	} else if isSpeedTemperature(rightArc.Sensor) {
+		v := fmt.Sprintf("%.0f RPM", rightValue)
 		x, y = calculateStringXY(100, v)
 		drawColorString(x, y+80, 100, v, arcImage, rightArc.TextColor)
 	} else {
@@ -694,10 +840,22 @@ func GenerateAnimationScreenImage(values []float32) []Frames {
 	sensors := animation.Sensors
 	separatorColor := animation.SeparatorColor
 	margin := int(animation.Margin)
+	workers := animation.Workers
 	mutex.Unlock()
 
-	if !ok {
-		return nil
+	if !ok || len(val) == 0 {
+		// The background is loaded lazily, so the first pass after startup or
+		// after a background change finds either no catalog entry or a nil frame
+		// slice waiting to be decoded.
+		if !ensureAnimationLoaded(background) {
+			return nil
+		}
+		mutex.Lock()
+		val, ok = animation.Images[background]
+		mutex.Unlock()
+		if !ok || len(val) == 0 {
+			return nil
+		}
 	}
 
 	z := 0
@@ -712,21 +870,40 @@ func GenerateAnimationScreenImage(values []float32) []Frames {
 	imageBuffer := make([]Frames, len(val))
 	var wg sync.WaitGroup
 	wg.Add(len(val))
-	sem := make(chan struct{}, animation.Workers)
+
+	// One scratch canvas per worker rather than per frame. A frame's scratch is
+	// only live between copying the background in and encoding the result, so
+	// at most Workers of them are ever in use; keeping one per frame pinned a
+	// full size RGBA for every frame of the animation for the process lifetime.
+	// The pool doubles as the concurrency limit.
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(val) {
+		workers = len(val)
+	}
+	pool := make(chan *image.RGBA, workers)
+	for w := 0; w < workers; w++ {
+		pool <- image.NewRGBA(val[0].Canvas.Bounds())
+	}
 
 	for i := 0; i < len(val); i++ {
-		sem <- struct{}{}
+		canvas := <-pool
 
 		i := i
 		canvasSource := val[i].Canvas
-		canvasRGBA := val[i].RGBA
 		delay := val[i].Delay
+
+		// Frames of a gif may carry different bounds; swap in a correctly sized
+		// canvas rather than copying into a mismatched one.
+		if canvas.Rect != canvasSource.Rect {
+			canvas = image.NewRGBA(canvasSource.Bounds())
+		}
 
 		go func() {
 			defer wg.Done()
-			defer func() { <-sem }()
+			defer func() { pool <- canvas }()
 
-			canvas := canvasRGBA
 			copy(canvas.Pix, canvasSource.Pix)
 
 			total := z * 125
@@ -748,9 +925,12 @@ func GenerateAnimationScreenImage(values []float32) []Frames {
 
 					default:
 						var sensorValue float32
-
-						if int(sensor.Sensor) < len(values) {
-							sensorValue = values[sensor.Sensor]
+						if sensor.Sensor == SensorTemperatureProbe {
+							sensorValue = stats.GetDeviceTemperature(sensor.DeviceId, sensor.ChannelId)
+						} else {
+							if int(sensor.Sensor) < len(values) {
+								sensorValue = values[sensor.Sensor]
+							}
 						}
 
 						sensorMax := sensorMaximumValue(sensor.Sensor)
@@ -797,6 +977,103 @@ func GenerateAnimationScreenImage(values []float32) []Frames {
 	return imageBuffer
 }
 
+// GenerateDotsScreenImage handles generation of dots screen image
+func GenerateDotsScreenImage(values []float32) []byte {
+	profile := GetDots()
+	if int(profile.Sensor) >= len(values) {
+		return nil
+	}
+	value := values[profile.Sensor]
+	if profile.Sensor == 6 {
+		value = stats.GetDeviceTemperature(profile.DeviceId, profile.ChannelId)
+	}
+	if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+		value = 0
+	}
+	text, unit := strconv.Itoa(int(value)), "%"
+	valueFontSize := 280.0
+	if isSensorTemperature(profile.Sensor) {
+		temperature := dashboard.GetDashboard().Temperature(value)
+		text, unit = temperature[0], temperature[1]
+		valueFontSize = 250
+	} else if isSpeedTemperature(profile.Sensor) {
+		unit = "RPM"
+		valueFontSize = 220
+	}
+	mutex.Lock()
+	defer mutex.Unlock()
+	valueLayer := image.NewRGBA(image.Rect(0, 0, imgWidth, imgHeight))
+	x, y := calculateStringXY(valueFontSize, text)
+	drawColorString(x, y, valueFontSize, text, valueLayer, profile.TextColor)
+
+	unitLayer := image.NewRGBA(image.Rect(0, 0, imgWidth, imgHeight))
+	unit = fmt.Sprintf("[ %s ]", unit)
+	x, y = calculateStringXY(40, unit)
+	drawColorString(x, y+120, 40, unit, unitLayer, profile.TextColor)
+
+	img := drawDotsField(profile, float64(value)/float64(sensorMaximumValue(profile.Sensor)), dotsTextBounds(valueLayer), dotsTextBounds(unitLayer))
+	draw.Draw(img, img.Bounds(), valueLayer, image.Point{}, draw.Over)
+	draw.Draw(img, img.Bounds(), unitLayer, image.Point{}, draw.Over)
+
+	var b bytes.Buffer
+	if err := jpeg.Encode(&b, img, nil); err != nil {
+		logger.Log(logger.Fields{"error": err}).Error("Unable to encode LCD image")
+		return nil
+	}
+	return b.Bytes()
+}
+
+// GenerateFillScreenImage handles generation of fill screen image
+func GenerateFillScreenImage(values []float32) []byte {
+	profile := GetFill()
+	if int(profile.Sensor) >= len(values) {
+		return nil
+	}
+
+	value := values[profile.Sensor]
+
+	if profile.Sensor == 6 {
+		value = stats.GetDeviceTemperature(profile.DeviceId, profile.ChannelId)
+	}
+
+	if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+		value = 0
+	}
+
+	text, unit := strconv.Itoa(int(value)), "%"
+	valueFontSize := 280.0
+	if isSensorTemperature(profile.Sensor) {
+		temperature := dashboard.GetDashboard().Temperature(value)
+		text, unit = temperature[0], temperature[1]
+		valueFontSize = 250
+	} else if isSpeedTemperature(profile.Sensor) {
+		unit = "RPM"
+		valueFontSize = 220
+	}
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	valueLayer := image.NewRGBA(image.Rect(0, 0, imgWidth, imgHeight))
+	x, y := calculateStringXY(valueFontSize, text)
+	drawColorString(x, y, valueFontSize, text, valueLayer, profile.TextColor)
+
+	unitLayer := image.NewRGBA(image.Rect(0, 0, imgWidth, imgHeight))
+	unit = fmt.Sprintf("[ %s ]", unit)
+	x, y = calculateStringXY(40, unit)
+	drawColorString(x, y+190, 40, unit, unitLayer, profile.TextColor)
+
+	img := drawFillField(profile, float64(value)/float64(sensorMaximumValue(profile.Sensor)))
+	draw.Draw(img, img.Bounds(), valueLayer, image.Point{}, draw.Over)
+	draw.Draw(img, img.Bounds(), unitLayer, image.Point{}, draw.Over)
+
+	var b bytes.Buffer
+	if err := jpeg.Encode(&b, img, nil); err != nil {
+		logger.Log(logger.Fields{"error": err}).Error("Unable to encode LCD image")
+		return nil
+	}
+	return b.Bytes()
+}
+
 // GenerateArcScreenImage handles generation or arc screen image
 func GenerateArcScreenImage(arcType, sensor, value int) []byte {
 	mutex.Lock()
@@ -810,6 +1087,10 @@ func GenerateArcScreenImage(arcType, sensor, value int) []byte {
 	// Prevent over 60
 	if arcType == 2 && value > 60 {
 		value = 60
+	}
+
+	if sensor == 6 {
+		value = int(stats.GetDeviceTemperature(arc.DeviceId, arc.ChannelId))
 	}
 
 	bg := generateColor(arc.Background)
@@ -850,6 +1131,16 @@ func GenerateArcScreenImage(arcType, sensor, value int) []byte {
 
 		// Unit
 		unit := fmt.Sprintf("[ %s ]", v[1])
+		x, y = calculateStringXY(40, unit)
+		drawColorString(x, y+120, 40, unit, img, arc.TextColor)
+	} else if isSpeedTemperature(uint8(sensor)) {
+		// Value
+		v := strconv.Itoa(value)
+		x, y := calculateStringXY(220, strconv.Itoa(value))
+		drawColorString(x, y, 220, v, img, arc.TextColor)
+
+		// Unit
+		unit := fmt.Sprintf("[ %s ]", "RPM")
 		x, y = calculateStringXY(40, unit)
 		drawColorString(x, y+120, 40, unit, img, arc.TextColor)
 	} else {
@@ -1078,6 +1369,66 @@ func drawColorString(x, y int, fontSite float64, text string, rgba *image.RGBA, 
 	d.DrawString(text)
 }
 
+// decodePalettedFrames re-reads an animated image from disk and returns its
+// resized frames. They are only needed to build animation canvases, so they are
+// produced on demand rather than held for the lifetime of the process: at
+// roughly 230 KB a frame, keeping them for every image on disk cost far more
+// than decoding the one image that actually gets animated, and most panels
+// never select the animation mode at all.
+func decodePalettedFrames(fileName string) []*image.Paletted {
+	// The name arrives from the animation profile, which the API writes, so it
+	// must not be joined into a path: "../.." would walk straight out of the
+	// image folder. Reject anything that is not a plain name, then resolve the
+	// file against the folder listing so the path is assembled only from entries
+	// the filesystem reported. Only the extension is case insensitive: the
+	// catalog and uploads distinguish base names such as Pulse and pulse.
+	if !common.AlphanumericRegex.MatchString(fileName) {
+		logger.Log(logger.Fields{"image": fileName}).Warn("Image name can only have letters and numbers")
+		return nil
+	}
+
+	entries, err := os.ReadDir(images)
+	if err != nil {
+		logger.Log(logger.Fields{"error": err, "location": images}).Warn("Unable to read image folder")
+		return nil
+	}
+
+	imagePath := ""
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.EqualFold(filepath.Ext(name), ".gif") &&
+			strings.TrimSuffix(name, filepath.Ext(name)) == fileName {
+			imagePath = filepath.Join(images, name)
+			break
+		}
+	}
+	if imagePath == "" {
+		logger.Log(logger.Fields{"image": fileName}).Warn("Unable to locate animation image")
+		return nil
+	}
+
+	file, err := os.Open(imagePath)
+	if err != nil {
+		logger.Log(logger.Fields{"error": err, "image": imagePath}).Warn("Unable to open image")
+		return nil
+	}
+	defer func(file *os.File) {
+		if err = file.Close(); err != nil {
+			logger.Log(logger.Fields{"error": err, "image": imagePath}).Warn("Unable to close image")
+		}
+	}(file)
+
+	src, err := gif.DecodeAll(file)
+	if err != nil {
+		logger.Log(logger.Fields{"error": err, "image": imagePath}).Warn("Error decoding gif animation")
+		return nil
+	}
+	return common.ResizeGifImage(src, imgWidth, imgHeight)
+}
+
 func loadImage(imagePath string, format uint8) {
 	file, err := os.Open(imagePath)
 	if err != nil {
@@ -1193,13 +1544,27 @@ func loadImage(imagePath string, format uint8) {
 		break
 	}
 
+	// Only the encoded frames are kept. The decoded ones were needed here just
+	// to produce them, and anything that wants them back can decode on demand.
 	imageList := &ImageData{
-		Name:           fileName,
-		Frames:         len(imageBuffer),
-		Buffer:         imageBuffer,
-		PalettedFrames: paletted,
+		Name:   fileName,
+		Frames: len(imageBuffer),
+		Buffer: imageBuffer,
 	}
 	paletted = nil
+
+	// Replace rather than append when the name is already known. Re-uploading
+	// an existing image otherwise leaves the previous copy in the slice with
+	// every frame still decoded, and nothing ever drops it. GetLcdImage
+	// returns the first match, so the stale copy is unreachable but retained.
+	imageDataMutex.Lock()
+	defer imageDataMutex.Unlock()
+	for i := range lcd.ImageData {
+		if lcd.ImageData[i].Name == fileName {
+			lcd.ImageData[i] = *imageList
+			return
+		}
+	}
 	lcd.ImageData = append(lcd.ImageData, *imageList)
 }
 

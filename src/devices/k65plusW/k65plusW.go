@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"OpenLinkHub/src/appmonitor"
 	"github.com/sstallion/go-hid"
 )
 
@@ -55,6 +56,7 @@ type DeviceProfile struct {
 	DisableWinKey        bool
 	Performance          bool
 	RGBCluster           bool
+	OpenRGBIntegration   bool
 	RgbOff               bool
 }
 
@@ -69,6 +71,7 @@ type Device struct {
 	DongleFirmware         string `json:"dongleFirmware"`
 	activeRgb              *rgb.ActiveRGB
 	UserProfiles           map[string]*DeviceProfile `json:"userProfiles"`
+	ProfileOrder           []string                  `json:"profileOrder"`
 	Devices                map[int]string            `json:"devices"`
 	DeviceProfile          *DeviceProfile
 	OriginalProfile        *DeviceProfile
@@ -127,6 +130,7 @@ var (
 	cmdWriteColor           = []byte{0x06, 0x01}
 	cmdSleep                = []byte{0x01, 0x0e, 0x00}
 	cmdBatteryLevel         = []byte{0x02, 0x0f}
+	cmdBatteryCharge        = []byte{0x02, 0x10}
 	cmdPerformance          = []byte{0x01, 0x4a, 0x00}
 	cmdWritePerformance     = []byte{0x01}
 	cmdOpenEndpoint         = []byte{0x0d, 0x01, 0x02}
@@ -222,6 +226,9 @@ func Init(vendorId, slipstreamId, productId uint16, dev *hid.Device, endpoint by
 			8:  "Sniper",
 			9:  "Mouse",
 			10: "Macro",
+			21: "Change Profile",
+			22: "Profile Switch",
+			23: "Global Profile",
 		},
 		MacroTracker: make(map[int]macro.Tracker),
 	}
@@ -231,6 +238,17 @@ func Init(vendorId, slipstreamId, productId uint16, dev *hid.Device, endpoint by
 	d.loadDeviceProfiles() // Load all device profiles
 	d.saveDeviceProfile()  // Save profile
 	return d
+}
+
+// updateStats will update device stats
+func (d *Device) updateStats() {
+	stats.UpdateDeviceConnectionStatus(d.Serial, d.Connected)
+	batteryCharge, err := d.transfer(cmdBatteryCharge, nil)
+	if err != nil {
+		logger.Log(logger.Fields{"error": err, "serial": d.Serial}).Error("Unable to get battery charge status")
+		return
+	}
+	stats.UpdateBatteryChargeStatus(d.Serial, batteryCharge[3])
 }
 
 // createDevice will create new device register object
@@ -454,6 +472,7 @@ func (d *Device) Connect() {
 		d.setBrightnessLevel() // Brightness
 		d.setSleepTimer()      // Sleep
 		d.setupPerformance()   // Performance
+		d.updateStats()        // Stats
 	}
 }
 
@@ -639,6 +658,9 @@ func (d *Device) setHardwareMode() {
 
 // getBatterLevel will return initial battery level
 func (d *Device) getBatterLevel() {
+	if d.Exit {
+		return
+	}
 	batteryLevel, err := d.transfer(cmdBatteryLevel, nil)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to get battery level")
@@ -763,6 +785,7 @@ func (d *Device) saveDeviceProfile() {
 		deviceProfile.DisableWinKey = d.DeviceProfile.DisableWinKey
 		deviceProfile.Performance = d.DeviceProfile.Performance
 		deviceProfile.RGBCluster = d.DeviceProfile.RGBCluster
+		deviceProfile.OpenRGBIntegration = d.DeviceProfile.OpenRGBIntegration
 
 		if len(d.DeviceProfile.Path) < 1 {
 			deviceProfile.Path = profilePath
@@ -858,7 +881,27 @@ func (d *Device) loadDeviceProfiles() {
 		}
 	}
 	d.UserProfiles = profileList
+	d.rebuildProfileOrder()
 	d.getDeviceProfile()
+}
+
+// GetDeviceProfiles will return list of available profiles
+func (d *Device) GetDeviceProfiles() interface{} {
+	profiles := make([]string, 0, len(d.UserProfiles))
+
+	for name := range d.UserProfiles {
+		profiles = append(profiles, name)
+	}
+	return profiles
+}
+
+// rebuildProfileOrder will return profile order
+func (d *Device) rebuildProfileOrder() {
+	d.ProfileOrder = d.ProfileOrder[:0]
+	for name := range d.UserProfiles {
+		d.ProfileOrder = append(d.ProfileOrder, name)
+	}
+	sort.Strings(d.ProfileOrder)
 }
 
 // getDeviceProfile will load persistent device configuration
@@ -934,6 +977,46 @@ func (d *Device) UpdateDeviceLabel(_ int, label string) uint8 {
 	d.DeviceProfile.Label = label
 	d.saveDeviceProfile()
 	return 1
+}
+
+// rotateDeviceProfile will rotate and activate next user profile
+func (d *Device) rotateDeviceProfile() {
+	if d.DeviceProfile == nil || len(d.ProfileOrder) == 0 || len(d.UserProfiles) == 0 {
+		return
+	}
+
+	var currentName string
+	for name, profile := range d.UserProfiles {
+		if profile.Active {
+			currentName = name
+			break
+		}
+	}
+
+	if currentName == "" {
+		next := d.ProfileOrder[0]
+		d.ChangeDeviceProfile(next)
+		return
+	}
+	idx := -1
+	for i, name := range d.ProfileOrder {
+		if name == currentName {
+			idx = i
+			break
+		}
+	}
+
+	if idx == -1 {
+		next := d.ProfileOrder[0]
+		d.ChangeDeviceProfile(next)
+		return
+	}
+
+	nextIdx := (idx + 1) % len(d.ProfileOrder)
+	next := d.ProfileOrder[nextIdx]
+
+	d.ChangeDeviceProfile(next)
+	return
 }
 
 // saveRgbProfile will save rgb profile data
@@ -2258,6 +2341,15 @@ func (d *Device) triggerKeyAssignment(value []byte, functionKey bool, modifierKe
 					}
 				}
 			}
+			break
+		case 21:
+			d.ChangeDeviceProfile(key.DeviceId)
+			break
+		case 22:
+			d.rotateDeviceProfile()
+			break
+		case 23:
+			appmonitor.ManualApplicationProfileChange(key.DeviceId)
 			break
 		}
 	}

@@ -38,7 +38,7 @@ type Device struct {
 	VendorId       uint16
 	Devices        map[int]*Devices `json:"devices"`
 	PairedDevices  map[uint16]any
-	SharedDevices  func(device *common.Device)
+	SharedDevices  func(device *common.Device) `json:"-"`
 	DeviceList     map[string]*common.Device
 	Template       string
 	Debug          bool
@@ -150,6 +150,29 @@ func (d *Device) addDevices() {
 				d.AddPairedDevice(value.ProductId, dev, object)
 			}
 		case 11049: // SABRE V2 PRO MG
+			{
+				dev := sabrev2proW.Init(
+					value.VendorId,
+					d.ProductId,
+					value.ProductId,
+					d.dev,
+					value.Endpoint,
+					value.Serial,
+				)
+
+				object := &common.Device{
+					ProductType: common.ProductTypeSabreV2Pro,
+					Product:     "SABRE V2 PRO MG",
+					Serial:      dev.Serial,
+					Firmware:    dev.Firmware,
+					Image:       "icon-mouse.svg",
+					Instance:    dev,
+					DeviceType:  common.DeviceTypeMouse,
+				}
+				d.SharedDevices(object)
+				d.AddPairedDevice(value.ProductId, dev, object)
+			}
+		case 11045: // SABRE V2 PRO CF
 			{
 				dev := sabrev2proW.Init(
 					value.VendorId,
@@ -306,7 +329,10 @@ func (d *Device) getDevices() {
 
 	if d.ProductId == 11060 {
 		mouseProductId = 11049
+	} else if d.ProductId == 11061 {
+		mouseProductId = 11045
 	}
+
 	devices[0] = &Devices{
 		Type:      1,
 		Endpoint:  0x08,
@@ -561,6 +587,7 @@ func (d *Device) mouseListener() {
 
 		var dev = d.findDevice()
 		if d.mouse != nil {
+			var pressedButtons byte
 			for {
 				if dev == nil {
 					continue
@@ -584,25 +611,29 @@ func (d *Device) mouseListener() {
 
 					// Buttons
 					if ev.Type == EvKey && (ev.Code == BtnBack || ev.Code == BtnForward || ev.Code == BtnMiddle || ev.Code == BtnLeft || ev.Code == BtnRight) {
-						var val byte = 0
+						var val byte
 						switch ev.Code {
-						case 272:
+						case BtnLeft:
 							val = 1
-						case 273:
+						case BtnRight:
 							val = 2
-						case 274:
+						case BtnMiddle:
 							val = 4
-						case 275:
+						case BtnBack:
 							val = 8
-						case 276:
+						case BtnForward:
 							val = 16
 						}
 
-						if ev.Value == 1 {
-							dev.TriggerKeyAssignment(val)
-						} else {
-							dev.TriggerKeyAssignment(0)
+						switch ev.Value {
+						case 1:
+							pressedButtons |= val
+						case 0:
+							pressedButtons &^= val
+						default:
+							continue
 						}
+						dev.TriggerKeyAssignment(pressedButtons)
 					}
 
 					// Mouse position

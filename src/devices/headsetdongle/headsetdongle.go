@@ -12,6 +12,7 @@ import (
 	"OpenLinkHub/src/devices/virtuosoW"
 	"OpenLinkHub/src/devices/virtuosorgbXTW"
 	"OpenLinkHub/src/logger"
+	"OpenLinkHub/src/stats"
 	"encoding/binary"
 	"fmt"
 	"github.com/sstallion/go-hid"
@@ -39,8 +40,8 @@ type Device struct {
 	Firmware       string `json:"firmware"`
 	ProductId      uint16
 	VendorId       uint16
-	Devices        map[int]*Devices `json:"devices"`
-	SharedDevices  func(device *common.Device)
+	Devices        map[int]*Devices            `json:"devices"`
+	SharedDevices  func(device *common.Device) `json:"-"`
 	DeviceList     map[string]*common.Device
 	PairedDevices  map[uint16]any
 	SingleDevice   bool
@@ -494,7 +495,7 @@ func (d *Device) getDevices() {
 		}
 	} else {
 		switch d.ProductId {
-		case 2622, 2624:
+		case 2622, 2624, 2628:
 			buff, _ = d.transferToDevice(cmdEndpoint, cmdProductId, nil, "")
 			if d.Debug {
 				logger.Log(logger.Fields{"serial": d.Serial, "length": len(buff), "data": fmt.Sprintf("% 2x", buff)}).Info("DEBUG")
@@ -692,21 +693,25 @@ func (d *Device) setDevicesOffline() {
 		if device, found := pairedDevice.(*virtuosorgbXTW.Device); found {
 			if device.Connected {
 				device.SetConnected(false)
+				stats.UpdateDeviceConnectionStatus(device.Serial, false)
 			}
 		}
 		if device, found := pairedDevice.(*virtuosoSEW.Device); found {
 			if device.Connected {
 				device.SetConnected(false)
+				stats.UpdateDeviceConnectionStatus(device.Serial, false)
 			}
 		}
 		if device, found := pairedDevice.(*hs80rgbW.Device); found {
 			if device.Connected {
 				device.SetConnected(false)
+				stats.UpdateDeviceConnectionStatus(device.Serial, false)
 			}
 		}
 		if device, found := pairedDevice.(*virtuosoW.Device); found {
 			if device.Connected {
 				device.SetConnected(false)
+				stats.UpdateDeviceConnectionStatus(device.Serial, false)
 			}
 		}
 	}
@@ -794,12 +799,35 @@ func (d *Device) monitorDevice() {
 // getListenerData will listen for keyboard events and return data on success or nil on failure.
 // ReadWithTimeout is mandatory due to the nature of listening for events
 func (d *Device) getListenerData() []byte {
+	if d.listener == nil {
+		return nil
+	}
 	data := make([]byte, bufferSize)
 	n, err := d.listener.ReadWithTimeout(data, 100*time.Millisecond)
 	if err != nil || n == 0 {
 		return nil
 	}
 	return data
+}
+
+// setDeviceChargeStatus will set device charge status
+func (d *Device) setDeviceChargeStatus(status byte) {
+	for _, value := range d.PairedDevices {
+		serial := ""
+		if dev, found := value.(*virtuosorgbXTW.Device); found {
+			serial = dev.Serial
+		}
+		if dev, found := value.(*virtuosoSEW.Device); found {
+			serial = dev.Serial
+		}
+		if dev, found := value.(*hs80rgbW.Device); found {
+			serial = dev.Serial
+		}
+		if dev, found := value.(*virtuosoW.Device); found {
+			serial = dev.Serial
+		}
+		stats.UpdateBatteryChargeStatus(serial, status)
+	}
 }
 
 // backendListener will listen for events from the device
@@ -821,6 +849,11 @@ func (d *Device) backendListener() {
 			logger.Log(logger.Fields{"error": err, "vendorId": d.VendorId}).Error("Unable to enumerate devices")
 		}
 
+		if d.listener == nil {
+			logger.Log(logger.Fields{"serial": d.Serial}).Error("Unable to open device listener")
+			return
+		}
+
 		// Listen loop
 		for {
 			select {
@@ -836,10 +869,16 @@ func (d *Device) backendListener() {
 
 				data := d.getListenerData()
 				if len(data) == 0 || data == nil {
+					time.Sleep(5 * time.Millisecond)
 					continue
 				}
 
 				// Battery
+				if data[0] == 0x03 && data[3] == 0x10 {
+					chargeStatus := data[5]
+					d.setDeviceChargeStatus(chargeStatus)
+				}
+
 				// 03 01 01 0f 00 ac 03
 				if (data[0] == 0x03 || data[1] == 0x01) && data[3] == 0x0f {
 					val := binary.LittleEndian.Uint16(data[5:7]) / 10

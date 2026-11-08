@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"OpenLinkHub/src/appmonitor"
 	"github.com/sstallion/go-hid"
 )
 
@@ -189,6 +190,7 @@ func Init(vendorId, productId uint16, dev *hid.Device, serial string) *Device {
 			9:  "Mouse",
 			10: "Macro",
 			11: "Profile Switch",
+			23: "Global Profile",
 		},
 		LiftHeights: map[int]string{
 			2: "Low",
@@ -213,6 +215,11 @@ func Init(vendorId, productId uint16, dev *hid.Device, serial string) *Device {
 	d.loadKeyAssignments() // Key Assignments
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Device successfully initialized")
 	return d
+}
+
+// updateStats will update device stats
+func (d *Device) updateStats() {
+	stats.UpdateDeviceConnectionStatus(d.Serial, d.Connected)
 }
 
 // SetConnected will change connected status
@@ -240,6 +247,7 @@ func (d *Device) Connect() {
 		d.setDeviceColor()      // Device color
 		d.toggleDPI(false)      // Set current DPI
 		d.setupKeyAssignment()  // Setup key assignments
+		d.updateStats()         // Stats
 	}
 }
 
@@ -766,6 +774,7 @@ func (d *Device) UpdateDeviceKeyAssignment(keyIndex int, keyAssignment inputmana
 		val.ActionCommand = keyAssignment.ActionCommand
 		val.IsMacro = keyAssignment.IsMacro
 		val.OnRelease = keyAssignment.OnRelease
+		val.DeviceId = keyAssignment.DeviceId
 		d.KeyAssignment[keyIndex] = val
 		d.saveKeyAssignments()
 		d.setupKeyAssignment()
@@ -1914,6 +1923,9 @@ func (d *Device) TriggerKeyAssignment(value uint16) {
 				break
 			case 11:
 				d.rotateDeviceProfile()
+				break
+			case 23:
+				appmonitor.ManualApplicationProfileChange(val.DeviceId)
 				break
 			}
 		}

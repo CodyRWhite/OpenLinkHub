@@ -1,0 +1,40 @@
+{{ define "xeneon-memory" }}
+{{ $root := .Root }}
+{{ $widget := .WidgetArea.Widget }}
+<div class="edge-panel xeneon-extra" id="xeneon-memory" style="--widget-text: {{ $widget.TextColor }}; --widget-subtext: {{ $widget.SubTextColor }}; --widget-accent: {{ $widget.DataColor }}; --widget-font-size: {{ $widget.FontSize }}px; --widget-subfont-size: {{ $widget.SubFontSize }}px;" data-show-swap="{{ $widget.ShowSwap }}">
+    <div class="card system-card">
+        <div class="card-body">
+            <div class="xeneon-extra-heading">{{ $widget.HeaderText }}</div>
+            <div class="xeneon-resource-scroll">
+                <div class="xeneon-memory-data" hidden>
+                    <div class="xeneon-resource-heading">
+                        <span>{{ $root.Lang "txtXeneonRAM" }}</span>
+                        <strong class="memory-percent"></strong>
+                    </div>
+                    <div class="xeneon-resource-bar"><span class="memory-progress"></span></div>
+                    <div class="xeneon-resource-details">
+                        <span>{{ $root.Lang "txtXeneonUsed" }} <b class="memory-used"></b></span>
+                        <span>{{ $root.Lang "txtXeneonTotal" }} <b class="memory-total"></b></span>
+                        <span>{{ $root.Lang "txtXeneonAvailable" }} <b class="memory-available"></b></span>
+                    </div>
+                    {{ if $widget.ShowSwap }}
+                    <div class="xeneon-swap-data">
+                        <div class="xeneon-resource-heading">
+                            <span>{{ $root.Lang "txtXeneonSwap" }}</span>
+                            <strong class="swap-percent"></strong>
+                        </div>
+                        <div class="xeneon-resource-bar"><span class="swap-progress"></span></div>
+                        <div class="xeneon-resource-details swap-details">
+                            <span>{{ $root.Lang "txtXeneonUsed" }} <b class="swap-used"></b></span>
+                            <span>{{ $root.Lang "txtXeneonTotal" }} <b class="swap-total"></b></span>
+                        </div>
+                        <div class="xeneon-extra-status swap-disabled" hidden>{{ $root.Lang "txtXeneonNoSwap" }}</div>
+                    </div>
+                    {{ end }}
+                </div>
+                <div class="xeneon-extra-status memory-status" role="status">{{ $root.Lang "txtXeneonLoading" }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+{{ end }}

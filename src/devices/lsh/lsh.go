@@ -36,6 +36,11 @@ import (
 	"github.com/sstallion/go-hid"
 )
 
+type V2DeviceModel struct {
+	Name        string
+	LedChannels uint8
+}
+
 type RGBOverride struct {
 	Enabled        bool
 	RGBStartColor  rgb.Color
@@ -76,6 +81,14 @@ type DeviceProfile struct {
 	OpenRGBIntegration   bool
 	RGBCluster           bool
 	RgbOff               bool
+	Timewarp             map[int]Timewarp
+}
+
+type Timewarp struct {
+	Enabled   bool
+	Color     rgb.Color
+	Direction int
+	Speed     int
 }
 
 // LinkAdapter contains a list of supported external-LED devices connected to a LINK adapter
@@ -123,6 +136,8 @@ type SupportedDevice struct {
 	CommanderDuo     bool   `json:"commanderDuo"`
 	Psu              bool   `json:"psu"`
 	VrmCooler        bool   `json:"vrmCooler"`
+	Timewarp         bool   `json:"timewarp"`
+	V2Device         bool   `json:"v2Device"`
 }
 
 type RailData struct {
@@ -179,6 +194,8 @@ type Devices struct {
 	SubDevices         map[int]LinkAdapter
 	DeviceCode         byte
 	TitanAIO           bool
+	TimewarpCapable    bool
+	IsV2Device         bool
 }
 
 type Device struct {
@@ -257,6 +274,7 @@ var (
 	cmdResetLedPower            = []byte{0x15, 0x01}
 	cmdDeviceCommandCodes       = []byte{0x1e}
 	cmdDeviceCommandLeds        = []byte{0x1d}
+	cmdTimeWarp                 = []byte{0x37}
 	cmdLcdPower                 = []byte{0x03, 0x19, 0x00, 0x01}
 	cmdLcdOff                   = []byte{0x03, 0x0b, 0x00, 0x01}
 	cmdLcdBrightness            = []byte{0x03, 0x0b, 0x64, 0x01}
@@ -268,6 +286,7 @@ var (
 	modeSetColor                = []byte{0x22}
 	modeGetPsuVolts             = []byte{0x28}
 	modeGetPsuAmps              = []byte{0x29}
+	modeGetDeviceModels         = []byte{0x40}
 	dataTypeGetDevices          = []byte{0x21, 0x00}
 	dataTypeGetTemperatures     = []byte{0x10, 0x00}
 	dataTypeGetSpeeds           = []byte{0x25, 0x00}
@@ -276,6 +295,7 @@ var (
 	dataTypeSubColor            = []byte{0x07, 0x00}
 	dataTypeCommandMode         = []byte{0x0d, 0x00}
 	dataTypeLedCount            = []byte{0x0c, 0x00}
+	dataTypeTimeWarp            = []byte{0x35, 0x00}
 	psuInitHeader               = byte(0x19)
 	bufferSize                  = 512
 	headerSize                  = 3
@@ -298,6 +318,7 @@ var (
 	i2cPrefix                   = "i2c"
 	voltsScale                  = 1000.0
 	ampsScale                   = 100.0
+	v2                          = byte(0x00)
 	rgbModes                    = []string{
 		"arc",
 		"circle",
@@ -378,6 +399,8 @@ func Init(vendorId, productId uint16, serial, path string) *common.Device {
 			100: "Arc",
 			101: "Double Arc",
 			102: "Animation",
+			103: "Dots",
+			104: "Fill",
 		},
 		LCDRotations: map[int]string{
 			0: "default",
@@ -456,6 +479,7 @@ func Init(vendorId, productId uint16, serial, path string) *common.Device {
 		d.setupLCD()         // LCD
 		d.setupLCDImage()    // LCD images
 	}
+	d.setTimeWarp()            // Timewarp
 	d.setupOpenRGBController() // OpenRGB Controller
 	d.setupClusterController() // RGB Cluster
 	d.createDevice()           // Device register
@@ -656,22 +680,24 @@ func (d *Device) Stop() {
 		})
 	}()
 
-	for _, lcdHidDevice := range d.lcdDevices {
-		if lcdHidDevice.Lcd != nil {
-			lcdReports := map[int][]byte{
-				0: {0x03, 0x1e, 0x01, 0x01},
-				1: {0x03, 0x1d, 0x00, 0x01},
-				2: {0x03, 0x0b, 0x64, 0x01},
-			}
-			for i := 0; i <= 2; i++ {
-				_, e := lcdHidDevice.Lcd.SendFeatureReport(lcdReports[i])
-				if e != nil {
-					logger.Log(logger.Fields{"error": e}).Error("Unable to send report to LCD HID device")
+	if d.HasLCD {
+		for _, lcdHidDevice := range d.lcdDevices {
+			if lcdHidDevice.Lcd != nil {
+				lcdReports := map[int][]byte{
+					0: {0x03, 0x1e, 0x01, 0x01},
+					1: {0x03, 0x1d, 0x00, 0x01},
+					2: {0x03, 0x0b, 0x64, 0x01},
 				}
-			}
-			err := lcdHidDevice.Lcd.Close()
-			if err != nil {
-				logger.Log(logger.Fields{"error": err}).Error("Unable to close LCD HID device")
+				for i := 0; i <= 2; i++ {
+					_, e := lcdHidDevice.Lcd.SendFeatureReport(lcdReports[i])
+					if e != nil {
+						logger.Log(logger.Fields{"error": e}).Error("Unable to send report to LCD HID device")
+					}
+				}
+				err := lcdHidDevice.Lcd.Close()
+				if err != nil {
+					logger.Log(logger.Fields{"error": err}).Error("Unable to close LCD HID device")
+				}
 			}
 		}
 	}
@@ -723,18 +749,20 @@ func (d *Device) StopDirty() uint8 {
 		})
 	}()
 
-	for _, lcdHidDevice := range d.lcdDevices {
-		if lcdHidDevice.Lcd != nil {
-			lcdReports := map[int][]byte{0: {0x03, 0x1e, 0x01, 0x01}, 1: {0x03, 0x1d, 0x00, 0x01}}
-			for i := 0; i <= 1; i++ {
-				_, e := lcdHidDevice.Lcd.SendFeatureReport(lcdReports[i])
-				if e != nil {
-					logger.Log(logger.Fields{"error": e}).Error("Unable to send report to LCD HID device")
+	if d.HasLCD {
+		for _, lcdHidDevice := range d.lcdDevices {
+			if lcdHidDevice.Lcd != nil {
+				lcdReports := map[int][]byte{0: {0x03, 0x1e, 0x01, 0x01}, 1: {0x03, 0x1d, 0x00, 0x01}}
+				for i := 0; i <= 1; i++ {
+					_, e := lcdHidDevice.Lcd.SendFeatureReport(lcdReports[i])
+					if e != nil {
+						logger.Log(logger.Fields{"error": e}).Error("Unable to send report to LCD HID device")
+					}
 				}
-			}
-			err := lcdHidDevice.Lcd.Close()
-			if err != nil {
-				logger.Log(logger.Fields{"error": err}).Error("Unable to close LCD HID device")
+				err := lcdHidDevice.Lcd.Close()
+				if err != nil {
+					logger.Log(logger.Fields{"error": err}).Error("Unable to close LCD HID device")
+				}
 			}
 		}
 	}
@@ -1013,7 +1041,7 @@ func (d *Device) getDeviceProfile() {
 
 // generateLedObject will generate LED object with given LED amount
 func (d *Device) generateLedObject(amount uint8) map[int]rgb.Color {
-	// Device doesnt exists
+	// Device does not exist
 	colors := make(map[int]rgb.Color, amount)
 	for i := 0; i < int(amount); i++ {
 		colors[i] = rgb.Color{
@@ -1051,6 +1079,7 @@ func (d *Device) saveDeviceProfile() {
 	rgbOverride := make(map[int]map[int]RGBOverride, len(d.Devices))
 	rgbPerLed := make(map[int]map[int]map[int]rgb.Color, len(d.Devices))
 	commanderDuoOverride := make(map[int]CommanderDuoOverride, len(d.Devices))
+	timewarp := make(map[int]Timewarp, len(d.Devices))
 	rgbProbes := make(map[int]int, len(d.Devices))
 	minTemps := make(map[int]float64, len(d.Devices))
 	maxTemps := make(map[int]float64, len(d.Devices))
@@ -1321,6 +1350,20 @@ func (d *Device) saveDeviceProfile() {
 					LedChannels: 0,
 				}
 			}
+
+			if device.TimewarpCapable {
+				timewarp[device.ChannelId] = Timewarp{
+					Enabled: false,
+					Color: rgb.Color{
+						Red:   0,
+						Green: 255,
+						Blue:  255,
+						Hex:   "#00FFFF",
+					},
+					Direction: 1,
+					Speed:     1,
+				}
+			}
 			rgbProfiles[device.ChannelId] = "static"
 			labels[device.ChannelId] = "Set Label"
 			rgbProbes[device.ChannelId] = 0
@@ -1346,6 +1389,7 @@ func (d *Device) saveDeviceProfile() {
 		deviceProfile.LCDDevices = lcdDevices
 		deviceProfile.RGBOverride = rgbOverride
 		deviceProfile.Positions = positions
+		deviceProfile.Timewarp = timewarp
 		d.DeviceProfile = deviceProfile
 	} else {
 		devLen := 0
@@ -1365,6 +1409,51 @@ func (d *Device) saveDeviceProfile() {
 			deviceProfile.Positions = positions
 		} else {
 			deviceProfile.Positions = d.DeviceProfile.Positions
+		}
+
+		if d.DeviceProfile.Timewarp == nil {
+			for _, device := range d.Devices {
+				if device.TimewarpCapable {
+					timewarp[device.ChannelId] = Timewarp{
+						Enabled: false,
+						Color: rgb.Color{
+							Red:   0,
+							Green: 255,
+							Blue:  255,
+							Hex:   "#00FFFF",
+						},
+						Direction: 1,
+						Speed:     1,
+					}
+				}
+			}
+			deviceProfile.Timewarp = timewarp
+		} else {
+			for _, device := range d.Devices {
+				if device.TimewarpCapable {
+					if warp, ok := d.DeviceProfile.Timewarp[device.ChannelId]; ok {
+						timewarp[device.ChannelId] = Timewarp{
+							Enabled:   warp.Enabled,
+							Color:     warp.Color,
+							Direction: warp.Direction,
+							Speed:     warp.Speed,
+						}
+					} else {
+						timewarp[device.ChannelId] = Timewarp{
+							Enabled: false,
+							Color: rgb.Color{
+								Red:   0,
+								Green: 255,
+								Blue:  255,
+								Hex:   "#00FFFF",
+							},
+							Direction: 1,
+							Speed:     1,
+						}
+					}
+				}
+			}
+			deviceProfile.Timewarp = timewarp
 		}
 
 		if d.DeviceProfile.CommanderDuoOverride == nil {
@@ -1750,7 +1839,7 @@ func (d *Device) SetCommanderDuoOverride(channelId int, enabled bool, ledChannel
 		}
 		time.Sleep(100 * time.Millisecond)
 
-		_, err := d.transfer(cmdResetLedPower, nil, false)
+		_, err := d.transfer(cmdResetLedPower, nil, false, v2)
 		if err != nil {
 			return 0
 		}
@@ -1929,6 +2018,74 @@ func (d *Device) UpdateDeviceLcdBrightness(channelId int, brightness uint8) uint
 		return 1
 	}
 	return 2
+}
+
+// setTimeWarp will set timewarp effect on timewarp capable device
+func (d *Device) setTimeWarp() {
+	if d.DeviceProfile == nil {
+		return
+	}
+
+	if d.DeviceProfile.RGBCluster {
+		logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Warn("Exiting Timewarp due to RGB Cluster")
+		return
+	}
+
+	if d.DeviceProfile.OpenRGBIntegration {
+		logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Warn("Exiting Timewarp due to OpenRGB Integration")
+		return
+	}
+
+	valid := 0
+
+	keys := make([]int, 0)
+	for k, device := range d.Devices {
+		if device.TimewarpCapable {
+			keys = append(keys, k)
+		}
+	}
+	sort.Ints(keys)
+	if len(keys) < 1 {
+		return
+	}
+
+	buf := make([]byte, len(keys)*4+1)
+	buf[0] = byte(len(keys))
+	offset := 1
+
+	for _, k := range keys {
+		if device, ok := d.Devices[k]; ok {
+			if device.TimewarpCapable {
+				data := make([]byte, 4)
+				data[0] = byte(device.ChannelId)
+				valid++
+				if effect, found := d.DeviceProfile.Timewarp[device.ChannelId]; found {
+					if effect.Enabled {
+						direction := effect.Direction
+						speed := effect.Speed
+
+						if direction < 1 || direction > 3 {
+							direction = 1
+						}
+
+						if speed < 0 || speed > 2 {
+							speed = 1
+						}
+						data[1] = byte(direction)
+						data[2] = byte(speed)
+						data[3] = 0x00
+					}
+				}
+				copy(buf[offset:offset+4], data)
+				offset += 4
+			}
+		}
+	}
+
+	if valid > 0 {
+		d.write(cmdTimeWarp, dataTypeTimeWarp, buf)
+		_, _ = d.transfer(cmdResetLedPower, nil, false, v2)
+	}
 }
 
 // setLcdBrightness sends the LCD backlight brightness command to the device
@@ -2740,6 +2897,11 @@ func (d *Device) ProcessSetOpenRgbIntegration(enabled bool) uint8 {
 	if d.DeviceProfile.RGBCluster {
 		return 2
 	}
+
+	if d.isTimewarpActive() {
+		return 3
+	}
+
 	d.clearQueue()
 	d.DeviceProfile.OpenRGBIntegration = enabled
 	d.saveDeviceProfile() // Save profile
@@ -2751,6 +2913,74 @@ func (d *Device) ProcessSetOpenRgbIntegration(enabled bool) uint8 {
 	return 1
 }
 
+func (d *Device) isTimewarpActive() bool {
+	for _, device := range d.Devices {
+		if device.TimewarpCapable {
+			if effect, found := d.DeviceProfile.Timewarp[device.ChannelId]; found {
+				if effect.Enabled {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ProcessGetRgbTimewarp will get rgb timewarp data
+func (d *Device) ProcessGetRgbTimewarp(deviceId int) interface{} {
+	if d.DeviceProfile == nil {
+		return nil
+	}
+
+	if device, ok := d.Devices[deviceId]; ok {
+		if device.TimewarpCapable {
+			if value, valid := d.DeviceProfile.Timewarp[deviceId]; valid {
+				return &value
+			}
+		}
+	}
+	return nil
+}
+
+// ProcessSetRgbTimewarp will update RGB timewarp settings
+func (d *Device) ProcessSetRgbTimewarp(channelId int, enabled bool, startColor rgb.Color, speed float64, direction int) uint8 {
+	if d.DeviceProfile == nil {
+		return 0
+	}
+
+	if speed < 0 || speed > 2 {
+		return 0
+	}
+
+	if direction < 1 || direction > 3 {
+		return 0
+	}
+
+	if d.DeviceProfile.OpenRGBIntegration {
+		return 2
+	}
+
+	if d.DeviceProfile.RGBCluster {
+		return 3
+	}
+
+	if device, ok := d.Devices[channelId]; ok {
+		if device.TimewarpCapable {
+			if value, valid := d.DeviceProfile.Timewarp[channelId]; valid {
+				value.Enabled = enabled
+				value.Color = startColor
+				value.Speed = int(speed)
+				value.Direction = direction
+				d.DeviceProfile.Timewarp[channelId] = value
+
+				d.saveDeviceProfile()
+				d.setTimeWarp()
+			}
+		}
+	}
+	return 1
+}
+
 // ProcessSetRgbCluster will update OpenRGB integration status
 func (d *Device) ProcessSetRgbCluster(enabled bool) uint8 {
 	if d.DeviceProfile == nil {
@@ -2758,6 +2988,10 @@ func (d *Device) ProcessSetRgbCluster(enabled bool) uint8 {
 	}
 	if d.DeviceProfile.OpenRGBIntegration {
 		return 2
+	}
+
+	if d.isTimewarpActive() {
+		return 3
 	}
 
 	lightChannels := 0
@@ -2954,7 +3188,7 @@ func (d *Device) UpdateLinkAdapter(channelId int, adapterId int) uint8 {
 				d.saveDeviceProfile()
 
 				// Full LED reset
-				_, err := d.transfer(cmdResetLedPower, nil, false)
+				_, err := d.transfer(cmdResetLedPower, nil, false, v2)
 				if err != nil {
 					return 0
 				}
@@ -3017,7 +3251,7 @@ func (d *Device) UpdateLinkAdapter(channelId int, adapterId int) uint8 {
 				}
 
 				// Re-init LED ports
-				_, err := d.transfer(cmdResetLedPower, nil, false)
+				_, err := d.transfer(cmdResetLedPower, nil, false, v2)
 				if err != nil {
 					return 0
 				}
@@ -3457,7 +3691,7 @@ func (d *Device) getDeviceData() {
 		return
 	}
 	// Speed
-	response := d.read(modeGetSpeeds, dataTypeGetSpeeds, false)
+	response := d.read(modeGetSpeeds, dataTypeGetSpeeds, false, v2)
 	if response == nil {
 		return
 	}
@@ -3494,7 +3728,7 @@ func (d *Device) getDeviceData() {
 	if d.Exit {
 		return
 	}
-	response = d.read(modeGetTemperatures, dataTypeGetTemperatures, false)
+	response = d.read(modeGetTemperatures, dataTypeGetTemperatures, false, v2)
 	if d.Debug {
 		logger.Log(logger.Fields{"serial": d.Serial, "data": fmt.Sprintf("% 2x", response), "type": "temperature"}).Info("getDeviceData()")
 	}
@@ -3537,7 +3771,7 @@ func (d *Device) getDeviceData() {
 		psuDeviceId := d.getPsuDeviceId()
 
 		// Volts
-		volts := d.read(modeGetPsuVolts, nil, true)
+		volts := d.read(modeGetPsuVolts, nil, true, v2)
 		if volts == nil {
 			return
 		}
@@ -3567,7 +3801,7 @@ func (d *Device) getDeviceData() {
 		}
 
 		// Amps
-		amps := d.read(modeGetPsuAmps, nil, true)
+		amps := d.read(modeGetPsuAmps, nil, true, v2)
 		if amps == nil {
 			return
 		}
@@ -3723,7 +3957,7 @@ func (d *Device) getDevices() int {
 	var devices = make(map[int]*Devices)
 	var nonAIOLcdData = lcd.GetNonAioLCDData()
 
-	response := d.read(modeGetDevices, dataTypeGetDevices, false)
+	response := d.read(modeGetDevices, dataTypeGetDevices, false, v2)
 	if d.Debug {
 		logger.Log(logger.Fields{"serial": d.Serial, "data": fmt.Sprintf("% 2x", response)}).Info("getDevices()")
 	}
@@ -3897,6 +4131,8 @@ func (d *Device) getDevices() int {
 			ProbeId:            probeId,
 			MinTemp:            minTemp,
 			MaxTemp:            maxTemp,
+			TimewarpCapable:    deviceMeta.Timewarp,
+			IsV2Device:         deviceMeta.V2Device,
 		}
 
 		if device.IsLinkAdapter {
@@ -3914,6 +4150,17 @@ func (d *Device) getDevices() int {
 		if device.IsCommanderDuo {
 			device.Name = fmt.Sprintf("%s - Channel %d", device.Name, duoPort)
 			duoPort++
+		}
+
+		if device.IsV2Device {
+			v2Dev := d.read(modeGetDeviceModels, nil, false, byte(device.ChannelId))
+			v2Device, err := d.parseV2DeviceModel(v2Dev)
+			if err != nil {
+				logger.Log(logger.Fields{"serial": d.Serial, "channel": device.ChannelId, "error": err}).Warn("Unable to parse V2 device model data.")
+			} else {
+				device.Name = v2Device.Name
+				device.LedChannels = v2Device.LedChannels
+			}
 		}
 
 		if device.IsPSU {
@@ -4043,6 +4290,58 @@ func (d *Device) getDevices() int {
 		d.Psu = true
 	}
 	return len(devices)
+}
+
+// parseV2DeviceModel will extract device model and LED amount from V2 devices
+func (d *Device) parseV2DeviceModel(data []byte) (*V2DeviceModel, error) {
+	const payloadOffset = 10
+
+	if len(data) < payloadOffset {
+		return nil, fmt.Errorf("device model packet too short: %d", len(data))
+	}
+
+	payloadLength := int(binary.LittleEndian.Uint16(data[8:10]))
+	if payloadLength > len(data)-payloadOffset {
+		return nil, fmt.Errorf("payload length %d exceeds available %d bytes", payloadLength, len(data)-payloadOffset)
+	}
+
+	result := &V2DeviceModel{}
+	end := payloadOffset + payloadLength
+	foundName, foundLEDs := false, false
+
+	for offset := payloadOffset; offset < end; {
+		if end-offset < 2 {
+			return nil, fmt.Errorf("incomplete field header at %d", offset)
+		}
+
+		fieldID := data[offset]
+		length := int(data[offset+1])
+		offset += 2
+
+		if length > end-offset {
+			return nil, fmt.Errorf("field %d: length %d exceeds remaining payload %d", fieldID, length, end-offset)
+		}
+
+		value := data[offset : offset+length]
+		offset += length
+
+		switch fieldID {
+		case 3:
+			result.Name = string(bytes.TrimRight(value, "\x00"))
+			foundName = true
+		case 12:
+			result.LedChannels = uint8(length)
+			foundLEDs = true
+		}
+	}
+
+	if !foundName {
+		return nil, fmt.Errorf("model name field 3 missing")
+	}
+	if !foundLEDs {
+		return nil, fmt.Errorf("LED field 12 missing")
+	}
+	return result, nil
 }
 
 // createPsuFanProfile will generate PSU temperature profile if PSU is present
@@ -4514,37 +4813,56 @@ func (d *Device) setDeviceColor() {
 					}
 				}
 			} else {
-				rgbOverride := d.getRgbOverride(k, 0)
-				if rgbOverride != nil && rgbOverride.Enabled && d.Devices[k].LedChannels > 0 {
-					profileOverride := d.GetRgbProfile("static")
-					if profileOverride == nil {
-						return
+				tw := false
+				if d.Devices[k].TimewarpCapable {
+					if timewarp, ok := d.DeviceProfile.Timewarp[k]; ok {
+						tw = timewarp.Enabled
+						if tw {
+							for i := 0; i < int(d.Devices[k].LedChannels); i++ {
+								static[m] = []byte{
+									byte(timewarp.Color.Red),
+									byte(timewarp.Color.Green),
+									byte(timewarp.Color.Blue),
+								}
+								m++
+							}
+						}
 					}
-					profileOverride.StartColor = rgbOverride.RGBStartColor
-					c = rgb.ModifyBrightness(profileOverride.StartColor)
-				} else {
-					c = profileColor
 				}
-				if d.HasLCD && d.Devices[k].AIO {
-					for i := 0; i < int(d.Devices[k].LedChannels); i++ {
-						static[m] = []byte{
-							byte(c.Red),
-							byte(c.Green),
-							byte(c.Blue),
+
+				if !tw {
+					rgbOverride := d.getRgbOverride(k, 0)
+					if rgbOverride != nil && rgbOverride.Enabled && d.Devices[k].LedChannels > 0 {
+						profileOverride := d.GetRgbProfile("static")
+						if profileOverride == nil {
+							return
 						}
-						if i > 15 && i < 20 {
-							static[m] = []byte{0, 0, 0}
-						}
-						m++
+						profileOverride.StartColor = rgbOverride.RGBStartColor
+						c = rgb.ModifyBrightness(profileOverride.StartColor)
+					} else {
+						c = profileColor
 					}
-				} else {
-					for i := 0; i < int(d.Devices[k].LedChannels); i++ {
-						static[m] = []byte{
-							byte(c.Red),
-							byte(c.Green),
-							byte(c.Blue),
+					if d.HasLCD && d.Devices[k].AIO {
+						for i := 0; i < int(d.Devices[k].LedChannels); i++ {
+							static[m] = []byte{
+								byte(c.Red),
+								byte(c.Green),
+								byte(c.Blue),
+							}
+							if i > 15 && i < 20 {
+								static[m] = []byte{0, 0, 0}
+							}
+							m++
 						}
-						m++
+					} else {
+						for i := 0; i < int(d.Devices[k].LedChannels); i++ {
+							static[m] = []byte{
+								byte(c.Red),
+								byte(c.Green),
+								byte(c.Blue),
+							}
+							m++
+						}
 					}
 				}
 			}
@@ -4590,6 +4908,21 @@ func (d *Device) setDeviceColor() {
 							}
 						}
 					} else {
+						if device := d.Devices[k]; device.TimewarpCapable {
+							if timewarp, ok := d.DeviceProfile.Timewarp[k]; ok && timewarp.Enabled {
+								static := make(map[int][]byte, device.LedChannels)
+								c := []byte{
+									byte(timewarp.Color.Red),
+									byte(timewarp.Color.Green),
+									byte(timewarp.Color.Blue),
+								}
+								for i := 0; i < int(device.LedChannels); i++ {
+									static[i] = c
+								}
+								buff = append(buff, rgb.SetColor(static)...)
+								continue
+							}
+						}
 						buff = append(buff, d.generateRgbEffect(k, d.Devices[k].LedChannels, &startTime, d.Devices[k].RGB, 0)...)
 					}
 				}
@@ -4872,13 +5205,13 @@ func (d *Device) setColorEndpoint() {
 	defer d.deviceLock.Unlock()
 
 	// Close any RGB endpoint
-	_, err := d.transfer(cmdCloseEndpoint, modeSetColor, false)
+	_, err := d.transfer(cmdCloseEndpoint, modeSetColor, false, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to close endpoint")
 	}
 
 	// Open RGB endpoint
-	_, err = d.transfer(cmdOpenColorEndpoint, modeSetColor, false)
+	_, err = d.transfer(cmdOpenColorEndpoint, modeSetColor, false, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to open endpoint")
 	}
@@ -4886,7 +5219,7 @@ func (d *Device) setColorEndpoint() {
 
 // setHardwareMode will switch a device to hardware mode
 func (d *Device) setHardwareMode() {
-	_, err := d.transfer(cmdHardwareMode, nil, false)
+	_, err := d.transfer(cmdHardwareMode, nil, false, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to change device mode")
 	}
@@ -4894,7 +5227,7 @@ func (d *Device) setHardwareMode() {
 
 // setSoftwareMode will switch a device to software mode
 func (d *Device) setSoftwareMode() {
-	_, err := d.transfer(cmdSoftwareMode, nil, false)
+	_, err := d.transfer(cmdSoftwareMode, nil, false, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to change device mode")
 	}
@@ -4903,7 +5236,7 @@ func (d *Device) setSoftwareMode() {
 
 // getLedDevices will get all connected LED data
 func (d *Device) getLedDevices() {
-	buf := d.read(modeGetLeds, nil, false)
+	buf := d.read(modeGetLeds, nil, false, v2)
 	channels := buf[6]
 	data := buf[7:]
 
@@ -5004,7 +5337,7 @@ func (d *Device) getSerial() {
 
 // getDeviceFirmware will return a device firmware version out as string
 func (d *Device) getDeviceFirmware() {
-	fw, err := d.transfer(cmdGetFirmware, nil, false)
+	fw, err := d.transfer(cmdGetFirmware, nil, false, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to write to a device")
 	}
@@ -5019,36 +5352,36 @@ func (d *Device) getDeviceFirmware() {
 }
 
 // read will read data from a device and return data as a byte array
-func (d *Device) read(endpoint, bufferType []byte, psu bool) []byte {
+func (d *Device) read(endpoint, bufferType []byte, psu bool, v2 byte) []byte {
 	d.deviceLock.Lock()
 	defer d.deviceLock.Unlock()
 
 	var buffer []byte
 
-	_, err := d.transfer(cmdCloseEndpoint, endpoint, psu)
+	_, err := d.transfer(cmdCloseEndpoint, endpoint, psu, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to close endpoint")
 	}
 
-	_, err = d.transfer(cmdOpenEndpoint, endpoint, psu)
+	_, err = d.transfer(cmdOpenEndpoint, endpoint, psu, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to open endpoint")
 	}
 
-	buffer, err = d.transfer(cmdRead, endpoint, psu)
+	buffer, err = d.transfer(cmdRead, endpoint, psu, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to read endpoint")
 	}
 
 	if responseMatch(buffer, bufferType) {
-		next, e := d.transfer(cmdRead, endpoint, psu)
+		next, e := d.transfer(cmdRead, endpoint, psu, v2)
 		if e != nil {
 			logger.Log(logger.Fields{"error": e}).Error("Unable to read endpoint")
 		}
 		buffer = append(buffer, next[4:]...)
 	}
 
-	_, err = d.transfer(cmdCloseEndpoint, endpoint, psu)
+	_, err = d.transfer(cmdCloseEndpoint, endpoint, psu, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to close endpoint")
 	}
@@ -5065,17 +5398,17 @@ func (d *Device) readDeviceData(endpoint []byte) []byte {
 	buff := cmdOpenColorEndpoint
 	buff = append(buff, endpoint...)
 
-	_, err := d.transfer(buff, nil, false)
+	_, err := d.transfer(buff, nil, false, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to open endpoint")
 	}
 
-	buffer, err = d.transfer(cmdReadColor, nil, false)
+	buffer, err = d.transfer(cmdReadColor, nil, false, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to read endpoint")
 	}
 
-	_, err = d.transfer(cmdCloseColorEndpoint, nil, false)
+	_, err = d.transfer(cmdCloseColorEndpoint, nil, false, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to close endpoint")
 	}
@@ -5303,31 +5636,74 @@ func (d *Device) setupLCD() {
 										)
 										d.transferToLcd(buffer, lcdDevice.Lcd)
 									}
+								case lcd.DisplayDots:
+									{
+										values := []float32{
+											temperatures.GetCpuTemperature(),
+											temperatures.GetGpuTemperature(),
+											d.getLiquidTemperature(),
+											float32(systeminfo.GetCpuUtilization()),
+											float32(systeminfo.GetGPUUtilization()),
+											float32(d.getPumpSpeed()),
+											0, // Temperature probe placeholder
+										}
+										image := lcd.GenerateDotsScreenImage(values)
+										if image != nil {
+											d.transferToLcd(image, lcdDevice.Lcd)
+										}
+									}
+								case lcd.DisplayFill:
+									{
+										values := []float32{
+											temperatures.GetCpuTemperature(),
+											temperatures.GetGpuTemperature(),
+											d.getLiquidTemperature(),
+											float32(systeminfo.GetCpuUtilization()),
+											float32(systeminfo.GetGPUUtilization()),
+											float32(d.getPumpSpeed()),
+											0, // Temperature probe placeholder
+										}
+										image := lcd.GenerateFillScreenImage(values)
+										if image != nil {
+											d.transferToLcd(image, lcdDevice.Lcd)
+										}
+									}
 								case lcd.DisplayArc:
 									{
 										val := 0
 										arcType := 0
 										sensor := 0
 										switch lcd.GetArc().Sensor {
-										case 0:
+										case 0: // CPU temperature
 											val = int(temperatures.GetCpuTemperature())
 											break
-										case 1:
+										case 1: // GPU temperature
 											val = int(temperatures.GetGpuTemperature())
 											arcType = 1
 											break
-										case 2:
+										case 2: // Liquid temperature
 											val = int(d.getLiquidTemperature())
 											arcType = 2
 											sensor = 2
 											break
-										case 3:
+										case 3: // CPU utilization
 											val = int(systeminfo.GetCpuUtilization())
 											sensor = 3
 											break
-										case 4:
+										case 4: // GPU utilization
 											val = systeminfo.GetGPUUtilization()
 											sensor = 4
+											break
+										case 5: // Pump speed
+											val = int(d.getPumpSpeed())
+											sensor = 5
+											arcType = 5
+											break
+										case 6: // Temperature Probe
+											val = 0
+											sensor = 6
+											arcType = 6
+											break
 										}
 										image := lcd.GenerateArcScreenImage(arcType, sensor, val)
 										if image != nil {
@@ -5342,6 +5718,8 @@ func (d *Device) setupLCD() {
 											d.getLiquidTemperature(),
 											float32(systeminfo.GetCpuUtilization()),
 											float32(systeminfo.GetGPUUtilization()),
+											float32(d.getPumpSpeed()),
+											0, // Temperature probe placeholder
 										}
 										image := lcd.GenerateDoubleArcScreenImage(values)
 										if image != nil {
@@ -5362,7 +5740,7 @@ func (d *Device) setupLCD() {
 										if image != nil {
 											imageLen := len(image)
 											for i := 0; i < imageLen; i++ {
-												if d.DeviceProfile.LCDMode != lcd.DisplayAnimation {
+												if d.DeviceProfile.LCDModes[device.ChannelId] != lcd.DisplayAnimation {
 													break
 												}
 												d.transferToLcd(image[i].Buffer, lcdDevice.Lcd)
@@ -5403,25 +5781,25 @@ func (d *Device) write(endpoint, bufferType, data []byte) []byte {
 		return bufferR
 	}
 
-	_, err := d.transfer(cmdCloseEndpoint, endpoint, false)
+	_, err := d.transfer(cmdCloseEndpoint, endpoint, false, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to close endpoint")
 		return bufferR
 	}
 
-	_, err = d.transfer(cmdOpenEndpoint, endpoint, false)
+	_, err = d.transfer(cmdOpenEndpoint, endpoint, false, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to open endpoint")
 		return bufferR
 	}
 
-	bufferR, err = d.transfer(cmdWrite, buffer, false)
+	bufferR, err = d.transfer(cmdWrite, buffer, false, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to write to endpoint")
 		return bufferR
 	}
 
-	_, err = d.transfer(cmdCloseEndpoint, endpoint, false)
+	_, err = d.transfer(cmdCloseEndpoint, endpoint, false, v2)
 	if err != nil {
 		logger.Log(logger.Fields{"error": err}).Error("Unable to close endpoint")
 		return bufferR
@@ -5454,12 +5832,12 @@ func (d *Device) writeColor(data []byte) {
 			break
 		}
 		if i == 0 {
-			_, err := d.transfer(cmdWriteColor, chunk, false)
+			_, err := d.transfer(cmdWriteColor, chunk, false, v2)
 			if err != nil {
 				logger.Log(logger.Fields{"error": err, "serial": d.Serial}).Error("Unable to write to color endpoint")
 			}
 		} else {
-			_, err := d.transfer(dataTypeSubColor, chunk, false)
+			_, err := d.transfer(dataTypeSubColor, chunk, false, v2)
 			if err != nil {
 				logger.Log(logger.Fields{"error": err, "serial": d.Serial}).Error("Unable to write to endpoint")
 			}
@@ -5530,12 +5908,12 @@ func (d *Device) writeColorCluster(data []byte, _ int) {
 			break
 		}
 		if i == 0 {
-			_, err := d.transfer(cmdWriteColor, chunk, false)
+			_, err := d.transfer(cmdWriteColor, chunk, false, v2)
 			if err != nil {
 				logger.Log(logger.Fields{"error": err, "serial": d.Serial}).Error("Unable to write to color endpoint")
 			}
 		} else {
-			_, err := d.transfer(dataTypeSubColor, chunk, false)
+			_, err := d.transfer(dataTypeSubColor, chunk, false, v2)
 			if err != nil {
 				logger.Log(logger.Fields{"error": err, "serial": d.Serial}).Error("Unable to write to endpoint")
 			}
@@ -5598,12 +5976,12 @@ func (d *Device) startQueueWorker() {
 					break
 				}
 				if i == 0 {
-					_, err := d.transfer(cmdWriteColor, chunk, false)
+					_, err := d.transfer(cmdWriteColor, chunk, false, v2)
 					if err != nil {
 						logger.Log(logger.Fields{"error": err, "serial": d.Serial}).Error("Unable to write to color endpoint")
 					}
 				} else {
-					_, err := d.transfer(dataTypeSubColor, chunk, false)
+					_, err := d.transfer(dataTypeSubColor, chunk, false, v2)
 					if err != nil {
 						logger.Log(logger.Fields{"error": err, "serial": d.Serial}).Error("Unable to write to endpoint")
 					}
@@ -5658,7 +6036,7 @@ func (d *Device) transferToLcd(buffer []byte, lcdDevice *hid.Device) {
 }
 
 // transfer will send data to a device and retrieve device output
-func (d *Device) transfer(endpoint, buffer []byte, psu bool) ([]byte, error) {
+func (d *Device) transfer(endpoint, buffer []byte, psu bool, v2 byte) ([]byte, error) {
 	d.mutex.Lock()
 	defer d.mutex.Unlock()
 
@@ -5679,6 +6057,11 @@ func (d *Device) transfer(endpoint, buffer []byte, psu bool) ([]byte, error) {
 		if psu {
 			bufferW[1] = psuInitHeader
 		}
+
+		if v2 != 0x00 {
+			bufferW[1] = v2
+		}
+
 		bufferW[2] = 0x01
 		endpointHeaderPosition := bufferW[headerSize : headerSize+len(endpoint)]
 		copy(endpointHeaderPosition, endpoint)

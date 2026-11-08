@@ -107,6 +107,7 @@ $(document).ready(function () {
     $('.saveArcProfile').on('click', function(){
         const profileId = $(this).attr('data-info');
         const sensorTypeVal = $("#sensorType_" + profileId).val();
+        const temperatureProbeVal = $("#temperatureProbes_" + profileId).val() || "0;0";
         const marginVal = $("#margin_" + profileId).val();
         const thicknessVal = $("#thickness_" + profileId).val();
         const gapRadiansVal = $("#gapRadians_" + profileId).val();
@@ -137,14 +138,140 @@ $(document).ready(function () {
         const textColor = hexToRgb(textColorVal);
         textColorRgb = {red:textColor.r, green:textColor.g, blue:textColor.b, hex:textColor.hex}
 
+        const probeData = temperatureProbeVal.split(';')
+
         const pf = {};
         pf["profileId"] = parseInt(profileId);
         pf["margin"] = parseFloat(marginVal);
         pf["sensor"] = parseInt(sensorTypeVal);
+        pf["deviceId"] = probeData[0];
+        pf["channelId"] = parseInt(probeData[1]);
         pf["thickness"] = parseFloat(thicknessVal);
         pf["gapRadians"] = parseFloat(gapRadiansVal);
         pf["backgroundColor"] = backgroundColorRgb;
         pf["borderColor"] = borderColorRgb;
+        pf["startColor"] = startColorRgb;
+        pf["endColor"] = endColorRgb;
+        pf["textColor"] = textColorRgb;
+
+        const json = JSON.stringify(pf, null, 2);
+
+        $.ajax({
+            url: '/api/lcd/modes',
+            type: 'PUT',
+            data: json,
+            cache: false,
+            success: function(response) {
+                try {
+                    if (response.status === 1) {
+                        toast.success(response.message);
+                    } else {
+                        toast.warning(response.message);
+                    }
+                } catch (err) {
+                    toast.warning(response.message);
+                }
+            }
+        });
+    });
+
+    $('.saveDotsProfile').on('click', function(){
+        const profileId = $(this).attr('data-info');
+        const sensorTypeVal = $("#sensorType_" + profileId).val();
+        const temperatureProbeVal = $("#temperatureProbes_" + profileId).val() || "0;0";
+        const marginVal = $("#margin_" + profileId).val();
+        const backgroundColorVal = $("#backgroundColor_" + profileId).val();
+        const startColorVal = $("#startColor_" + profileId).val();
+        const endColorVal = $("#endColor_" + profileId).val();
+        const textColorVal = $("#textColor_" + profileId).val();
+
+        let backgroundColorRgb = {}
+        let startColorRgb = {}
+        let endColorRgb = {}
+        let textColorRgb = {}
+
+        const backgroundColor = hexToRgb(backgroundColorVal);
+        backgroundColorRgb = {red:backgroundColor.r, green:backgroundColor.g, blue:backgroundColor.b, hex:backgroundColor.hex}
+
+        const startColor = hexToRgb(startColorVal);
+        startColorRgb = {red:startColor.r, green:startColor.g, blue:startColor.b, hex:startColor.hex}
+
+        const endColor = hexToRgb(endColorVal);
+        endColorRgb = {red:endColor.r, green:endColor.g, blue:endColor.b, hex:endColor.hex}
+
+        const textColor = hexToRgb(textColorVal);
+        textColorRgb = {red:textColor.r, green:textColor.g, blue:textColor.b, hex:textColor.hex}
+
+        const probeData = temperatureProbeVal.split(';')
+
+        const pf = {};
+        pf["profileId"] = parseInt(profileId);
+        pf["margin"] = parseFloat(marginVal);
+        pf["sensor"] = parseInt(sensorTypeVal);
+        pf["deviceId"] = probeData[0];
+        pf["channelId"] = parseInt(probeData[1]);
+        pf["backgroundColor"] = backgroundColorRgb;
+        pf["startColor"] = startColorRgb;
+        pf["endColor"] = endColorRgb;
+        pf["textColor"] = textColorRgb;
+
+        const json = JSON.stringify(pf, null, 2);
+
+        $.ajax({
+            url: '/api/lcd/modes',
+            type: 'PUT',
+            data: json,
+            cache: false,
+            success: function(response) {
+                try {
+                    if (response.status === 1) {
+                        toast.success(response.message);
+                    } else {
+                        toast.warning(response.message);
+                    }
+                } catch (err) {
+                    toast.warning(response.message);
+                }
+            }
+        });
+    });
+
+    $('.saveFillProfile').on('click', function(){
+        const profileId = $(this).attr('data-info');
+        const sensorTypeVal = $("#sensorType_" + profileId).val();
+        const temperatureProbeVal = $("#temperatureProbes_" + profileId).val() || "0;0";
+        const marginVal = $("#margin_" + profileId).val();
+        const backgroundColorVal = $("#backgroundColor_" + profileId).val();
+        const startColorVal = $("#startColor_" + profileId).val();
+        const endColorVal = $("#endColor_" + profileId).val();
+        const textColorVal = $("#textColor_" + profileId).val();
+
+        let backgroundColorRgb = {}
+        let startColorRgb = {}
+        let endColorRgb = {}
+        let textColorRgb = {}
+
+        const backgroundColor = hexToRgb(backgroundColorVal);
+        backgroundColorRgb = {red:backgroundColor.r, green:backgroundColor.g, blue:backgroundColor.b, hex:backgroundColor.hex}
+
+        const startColor = hexToRgb(startColorVal);
+        startColorRgb = {red:startColor.r, green:startColor.g, blue:startColor.b, hex:startColor.hex}
+
+        const endColor = hexToRgb(endColorVal);
+        endColorRgb = {red:endColor.r, green:endColor.g, blue:endColor.b, hex:endColor.hex}
+
+        const textColor = hexToRgb(textColorVal);
+        textColorRgb = {red:textColor.r, green:textColor.g, blue:textColor.b, hex:textColor.hex}
+
+        const probeData = temperatureProbeVal.split(';')
+
+        const pf = {};
+        pf["profileId"] = parseInt(profileId);
+        pf["margin"] = parseFloat(marginVal);
+        pf["sensor"] = parseInt(sensorTypeVal);
+        pf["deviceId"] = probeData[0];
+        pf["channelId"] = parseInt(probeData[1]);
+        pf["backgroundColor"] = backgroundColorRgb;
         pf["startColor"] = startColorRgb;
         pf["endColor"] = endColorRgb;
         pf["textColor"] = textColorRgb;
@@ -236,14 +363,19 @@ $(document).ready(function () {
             let textColorRgb = {}
 
             let sensorTypeVal = $("#sensorType_" + i + "_" + profileId).val();
+            let temperatureProbeVal = $("#temperatureProbes_" + i + "_" + profileId).val() || "0;0";
             let textColorVal = $("#textColor_" + i + "_" + profileId).val();
             const sensorEnabledVal = $("#sensorEnabled_" + i + "_" + profileId);
             const sensorEnabled = sensorEnabledVal.is(':checked');
             const textColor = hexToRgb(textColorVal);
             textColorRgb = {red:textColor.r, green:textColor.g, blue:textColor.b, hex:textColor.hex}
 
+            const probeData = temperatureProbeVal.split(';')
+
             sensors[i] = {
                 "sensor": parseInt(sensorTypeVal),
+                "deviceId": probeData[0],
+                "channelId": parseInt(probeData[1]),
                 "textColor": textColorRgb,
                 "enabled": sensorEnabled,
             }
@@ -308,6 +440,7 @@ $(document).ready(function () {
             let textColorRgb = {}
 
             let sensorTypeVal = $("#sensorType_" + i).val();
+            let temperatureProbeVal = $("#temperatureProbes_" + i).val() || "0;0";
             let startColorVal = $("#startColor_" + i).val();
             let endColorVal = $("#endColor_" + i).val();
             let textColorVal = $("#textColor_" + i).val();
@@ -321,8 +454,12 @@ $(document).ready(function () {
             const textColor = hexToRgb(textColorVal);
             textColorRgb = {red:textColor.r, green:textColor.g, blue:textColor.b, hex:textColor.hex}
 
+            const probeData = temperatureProbeVal.split(';')
+
             arcs[i] = {
                 "sensor": parseInt(sensorTypeVal),
+                "deviceId": probeData[0],
+                "channelId": parseInt(probeData[1]),
                 "startColor": startColorRgb,
                 "endColor": endColorRgb,
                 "textColor": textColorRgb,
@@ -359,4 +496,17 @@ $(document).ready(function () {
             }
         });
     });
+
+    function updateTemperatureProbeVisibility() {
+        const target = document.getElementById(this.dataset.probeTarget);
+        if (!target) {
+            return;
+        }
+
+        $(target).toggle(this.value === "6");
+    }
+
+    $(".sensorType[data-probe-target]")
+        .on("change", updateTemperatureProbeVisibility)
+        .each(updateTemperatureProbeVisibility);
 });

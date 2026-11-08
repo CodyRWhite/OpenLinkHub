@@ -47,6 +47,7 @@ type Configuration struct {
 	MotherboardBiosOnExit     bool     `json:"motherboardBiosOnExit"`
 	EnableGpuRGB              bool     `json:"enableGpuRGB"`
 	MemoryRegisterOverride    []byte   `json:"memoryRegisterOverride"`
+	AppMonitor                bool     `json:"appMonitor"`
 }
 
 var (
@@ -73,6 +74,7 @@ var (
 		"enableMotherboard":         false,
 		"motherboardBiosOnExit":     false,
 		"memoryRegisterOverride":    make([]byte, 0),
+		"appMonitor":                false,
 	}
 	systemService = true
 )
@@ -169,6 +171,7 @@ func upgradeFile(cfg string) {
 			MotherboardBiosOnExit:     false,
 			EnableGpuRGB:              false,
 			MemoryRegisterOverride:    make([]byte, 0),
+			AppMonitor:                false,
 		}
 		saveConfigSettings(value)
 	} else {

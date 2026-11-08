@@ -9,6 +9,7 @@ import (
 	"OpenLinkHub/src/config"
 	"OpenLinkHub/src/devices/virtuosomaxW"
 	"OpenLinkHub/src/logger"
+	"OpenLinkHub/src/stats"
 	"encoding/binary"
 	"fmt"
 	"github.com/sstallion/go-hid"
@@ -33,8 +34,8 @@ type Device struct {
 	Firmware       string `json:"firmware"`
 	ProductId      uint16
 	VendorId       uint16
-	Devices        *Devices `json:"devices"`
-	SharedDevices  func(device *common.Device)
+	Devices        *Devices                    `json:"devices"`
+	SharedDevices  func(device *common.Device) `json:"-"`
 	PairedDevices  map[uint16]any
 	SingleDevice   bool
 	Template       string
@@ -321,6 +322,7 @@ func (d *Device) setDevicesOffline() {
 		if device, found := pairedDevice.(*virtuosomaxW.Device); found {
 			if device.Connected {
 				device.SetConnected(false)
+				stats.UpdateDeviceConnectionStatus(device.Serial, false)
 			}
 		}
 	}
@@ -383,6 +385,9 @@ func (d *Device) monitorDevice() {
 // getListenerData will listen for keyboard events and return data on success or nil on failure.
 // ReadWithTimeout is mandatory due to the nature of listening for events
 func (d *Device) getListenerData() []byte {
+	if d.listener == nil {
+		return nil
+	}
 	data := make([]byte, bufferSize)
 	n, err := d.listener.ReadWithTimeout(data, 100*time.Millisecond)
 	if err != nil || n == 0 {
@@ -410,6 +415,11 @@ func (d *Device) backendListener() {
 			logger.Log(logger.Fields{"error": err, "vendorId": d.VendorId}).Error("Unable to enumerate devices")
 		}
 
+		if d.listener == nil {
+			logger.Log(logger.Fields{"serial": d.Serial}).Error("Unable to open device listener")
+			return
+		}
+
 		// Listen loop
 		for {
 			select {
@@ -425,10 +435,16 @@ func (d *Device) backendListener() {
 
 				data := d.getListenerData()
 				if len(data) == 0 || data == nil {
+					time.Sleep(5 * time.Millisecond)
 					continue
 				}
 
 				// Battery
+				if data[0] == 0x03 && data[3] == 0x10 {
+					chargeStatus := data[5]
+					stats.UpdateBatteryChargeStatus(d.Devices.Serial, chargeStatus)
+				}
+
 				if data[0] == 0x03 && data[1] == 0x01 && data[3] == 0x0f {
 					val := binary.LittleEndian.Uint16(data[5:7]) / 10
 					if val > 0 {

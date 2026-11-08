@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"OpenLinkHub/src/appmonitor"
 	"github.com/sstallion/go-hid"
 )
 
@@ -122,6 +123,8 @@ type Device struct {
 	DPIAmount             int
 	stopRepeat            chan struct{}
 	stopRepeatMutex       sync.Mutex
+	macroLoopMutex        sync.Mutex
+	macroLoops            map[uint32]chan struct{}
 }
 
 var (
@@ -229,6 +232,7 @@ func Init(vendorId, productId uint16, _, path string) *common.Device {
 			9:  "Mouse",
 			10: "Macro",
 			11: "Profile Switch",
+			23: "Global Profile",
 		},
 		InputActions:      inputmanager.GetInputActions(),
 		keyAssignmentFile: "/database/key-assignments/scimitar.json",
@@ -238,6 +242,7 @@ func Init(vendorId, productId uint16, _, path string) *common.Device {
 		MaxDPI:            maxDpiValue,
 		ZoneAmount:        4,
 		DPIAmount:         6,
+		macroLoops:        make(map[uint32]chan struct{}),
 	}
 
 	d.getDebugMode()           // Debug mode
@@ -1390,6 +1395,7 @@ func (d *Device) UpdateDeviceKeyAssignment(keyIndex int, keyAssignment inputmana
 		val.ActionCommand = keyAssignment.ActionCommand
 		val.IsMacro = keyAssignment.IsMacro
 		val.OnRelease = keyAssignment.OnRelease
+		val.DeviceId = keyAssignment.DeviceId
 		d.KeyAssignment[keyIndex] = val
 		d.saveKeyAssignments()
 		d.setupKeyAssignment()
@@ -2195,6 +2201,7 @@ func (d *Device) startQueueWorker() {
 				dpiColor = d.getSniperColor()
 			}
 			if dpiColor == nil {
+				d.deviceLock.Unlock()
 				return
 			}
 
@@ -2525,73 +2532,242 @@ func (d *Device) triggerKeyAssignment(value uint32) {
 					logger.Log(logger.Fields{"serial": d.Serial}).Error("Invalid macro profile")
 					return
 				}
-				for i := 0; i < len(macroProfile.Actions); i++ {
-					if v, valid := macroProfile.Actions[i]; valid {
-						// Add to macro tracker for easier release
-						if v.ActionHold {
-							d.addToMacroTracker(i, v.ActionCommand)
+
+				if macroProfile.Repeat < 0 {
+					d.macroLoopMutex.Lock()
+
+					if stop, running := d.macroLoops[mask]; running {
+						close(stop)
+						delete(d.macroLoops, mask)
+						d.macroLoopMutex.Unlock()
+
+						if len(d.MacroTracker) > 0 {
+							d.releaseMacroTracker()
 						}
-						switch v.ActionType {
-						case 1, 3:
-							inputmanager.InputControlKeyboard(v.ActionCommand, v.ActionHold)
-						case 9:
-							inputmanager.InputControlMouse(v.ActionCommand)
-						case 5:
-							if v.ActionDelay > 0 {
-								time.Sleep(time.Duration(v.ActionDelay) * time.Millisecond)
+						break
+					}
+
+					stop := make(chan struct{})
+					d.macroLoops[mask] = stop
+					d.macroLoopMutex.Unlock()
+
+					go func(macroProfile *macro.Macro, stop chan struct{}) {
+						firstRun := true
+
+						for {
+							select {
+							case <-stop:
+								return
+							default:
 							}
-						case 6:
-							if v.ActionRepeat > 0 {
-								for z := 0; z < int(v.ActionRepeat); z++ {
-									inputmanager.InputControlKeyboardText(v.ActionText)
-									if v.ActionRepeatDelay > 0 && v.ActionRepeat > 1 {
-										time.Sleep(time.Duration(v.ActionRepeatDelay) * time.Millisecond)
+
+							for i := 0; i < len(macroProfile.Actions); i++ {
+								if v, valid := macroProfile.Actions[i]; valid {
+									if v.ActionHold && !firstRun {
+										continue
 									}
-								}
-							} else {
-								inputmanager.InputControlKeyboardText(v.ActionText)
-							}
-						case 20:
-							if v.ActionRepeat > 0 && !v.ActionHold {
-								d.stopRepeatMutex.Lock()
-								if d.stopRepeat != nil {
-									close(d.stopRepeat)
-								}
+									if v.ActionHold {
+										d.addToMacroTracker(i, v.ActionCommand)
+									}
 
-								d.stopRepeat = make(chan struct{})
-								localStop := d.stopRepeat
-								d.stopRepeatMutex.Unlock()
+									switch v.ActionType {
+									case 1, 3:
+										inputmanager.InputControlKeyboard(v.ActionCommand, v.ActionHold)
+									case 9:
+										inputmanager.InputControlMouse(v.ActionCommand)
+									case 5:
+										if v.ActionDelay > 0 {
+											time.Sleep(time.Duration(v.ActionDelay) * time.Millisecond)
+										}
+									case 6:
+										if v.ActionRepeat > 0 {
+											for z := 0; z < int(v.ActionRepeat); z++ {
+												inputmanager.InputControlKeyboardText(v.ActionText)
 
-								go func() {
-									for z := 0; z < int(v.ActionRepeat); z++ {
-										select {
-										case <-localStop:
-											return
-										default:
+												if v.ActionRepeatDelay > 0 && v.ActionRepeat > 1 {
+													time.Sleep(time.Duration(v.ActionRepeatDelay) * time.Millisecond)
+												}
+											}
+										} else {
+											inputmanager.InputControlKeyboardText(v.ActionText)
+										}
+									case 20:
+										if v.ActionRepeat > 0 && !v.ActionHold {
+											d.stopRepeatMutex.Lock()
+											if d.stopRepeat != nil {
+												close(d.stopRepeat)
+											}
+
+											d.stopRepeat = make(chan struct{})
+											localStop := d.stopRepeat
+											d.stopRepeatMutex.Unlock()
+
+											go func(action macro.Actions) {
+												for z := 0; z < int(action.ActionRepeat); z++ {
+													select {
+													case <-localStop:
+														return
+													default:
+														if action.MousePositionAbsolute {
+															inputmanager.InputControlMoveAbsolute(
+																int32(action.MousePositionX),
+																int32(action.MousePositionY),
+															)
+														} else {
+															inputmanager.InputControlMove(
+																int32(action.MousePositionX),
+																int32(action.MousePositionY),
+															)
+														}
+													}
+
+													if action.ActionRepeatDelay > 0 && action.ActionRepeat > 1 {
+														time.Sleep(
+															time.Duration(action.ActionRepeatDelay) *
+																time.Millisecond,
+														)
+													}
+												}
+											}(v)
+										} else {
 											if v.MousePositionAbsolute {
-												inputmanager.InputControlMoveAbsolute(int32(v.MousePositionX), int32(v.MousePositionY))
+												inputmanager.InputControlMoveAbsolute(
+													int32(v.MousePositionX),
+													int32(v.MousePositionY),
+												)
 											} else {
-												inputmanager.InputControlMove(int32(v.MousePositionX), int32(v.MousePositionY))
+												inputmanager.InputControlMove(
+													int32(v.MousePositionX),
+													int32(v.MousePositionY),
+												)
 											}
 										}
-										if v.ActionRepeatDelay > 0 && v.ActionRepeat > 1 {
-											time.Sleep(time.Duration(v.ActionRepeatDelay) * time.Millisecond)
-										}
 									}
-								}()
-							} else {
-								if v.MousePositionAbsolute {
-									inputmanager.InputControlMoveAbsolute(int32(v.MousePositionX), int32(v.MousePositionY))
-								} else {
-									inputmanager.InputControlMove(int32(v.MousePositionX), int32(v.MousePositionY))
+								}
+							}
+
+							firstRun = false
+							if macroProfile.RepeatDelay > 0 {
+								select {
+								case <-stop:
+									return
+								case <-time.After(
+									time.Duration(macroProfile.RepeatDelay) *
+										time.Millisecond,
+								):
 								}
 							}
 						}
+					}(macroProfile, stop)
+					break
+				}
+
+				repeat := macroProfile.Repeat
+				if repeat <= 0 {
+					repeat = 1
+				}
+
+				for r := 0; r < repeat; r++ {
+					for i := 0; i < len(macroProfile.Actions); i++ {
+						if v, valid := macroProfile.Actions[i]; valid {
+							if v.ActionHold && r > 0 {
+								continue
+							}
+
+							if v.ActionHold {
+								d.addToMacroTracker(i, v.ActionCommand)
+							}
+
+							switch v.ActionType {
+							case 1, 3:
+								inputmanager.InputControlKeyboard(v.ActionCommand, v.ActionHold)
+							case 9:
+								inputmanager.InputControlMouse(v.ActionCommand)
+							case 5:
+								if v.ActionDelay > 0 {
+									time.Sleep(time.Duration(v.ActionDelay) * time.Millisecond)
+								}
+							case 6:
+								if v.ActionRepeat > 0 {
+									for z := 0; z < int(v.ActionRepeat); z++ {
+										inputmanager.InputControlKeyboardText(v.ActionText)
+
+										if v.ActionRepeatDelay > 0 && v.ActionRepeat > 1 {
+											time.Sleep(
+												time.Duration(v.ActionRepeatDelay) *
+													time.Millisecond,
+											)
+										}
+									}
+								} else {
+									inputmanager.InputControlKeyboardText(v.ActionText)
+								}
+							case 20:
+								if v.ActionRepeat > 0 && !v.ActionHold {
+									d.stopRepeatMutex.Lock()
+									if d.stopRepeat != nil {
+										close(d.stopRepeat)
+									}
+
+									d.stopRepeat = make(chan struct{})
+									localStop := d.stopRepeat
+									d.stopRepeatMutex.Unlock()
+
+									go func(action macro.Actions) {
+										for z := 0; z < int(action.ActionRepeat); z++ {
+											select {
+											case <-localStop:
+												return
+											default:
+												if action.MousePositionAbsolute {
+													inputmanager.InputControlMoveAbsolute(
+														int32(action.MousePositionX),
+														int32(action.MousePositionY),
+													)
+												} else {
+													inputmanager.InputControlMove(
+														int32(action.MousePositionX),
+														int32(action.MousePositionY),
+													)
+												}
+											}
+											if action.ActionRepeatDelay > 0 && action.ActionRepeat > 1 {
+												time.Sleep(
+													time.Duration(action.ActionRepeatDelay) *
+														time.Millisecond,
+												)
+											}
+										}
+									}(v)
+								} else {
+									if v.MousePositionAbsolute {
+										inputmanager.InputControlMoveAbsolute(
+											int32(v.MousePositionX),
+											int32(v.MousePositionY),
+										)
+									} else {
+										inputmanager.InputControlMove(
+											int32(v.MousePositionX),
+											int32(v.MousePositionY),
+										)
+									}
+								}
+							}
+						}
+					}
+					if macroProfile.RepeatDelay > 0 && r < repeat-1 {
+						time.Sleep(
+							time.Duration(macroProfile.RepeatDelay) *
+								time.Millisecond,
+						)
 					}
 				}
 				break
 			case 11:
 				d.rotateDeviceProfile()
+				break
+			case 23:
+				appmonitor.ManualApplicationProfileChange(val.DeviceId)
 				break
 			}
 		}
@@ -2628,6 +2804,9 @@ func (d *Device) transfer(endpoint, buffer []byte, caller string) ([]byte, error
 // getListenerData will listen for keyboard events and return data on success or nil on failure.
 // ReadWithTimeout is mandatory due to the nature of listening for events
 func (d *Device) getListenerData() []byte {
+	if d.listener == nil {
+		return nil
+	}
 	data := make([]byte, bufferSize)
 	n, err := d.listener.ReadWithTimeout(data, 100*time.Millisecond)
 	if err != nil || n == 0 {
@@ -2655,6 +2834,11 @@ func (d *Device) backendListener() {
 			logger.Log(logger.Fields{"error": err, "vendorId": d.VendorId}).Error("Unable to enumerate devices")
 		}
 
+		if d.listener == nil {
+			logger.Log(logger.Fields{"serial": d.Serial}).Error("Unable to open device listener")
+			return
+		}
+
 		for {
 			select {
 			default:
@@ -2669,6 +2853,7 @@ func (d *Device) backendListener() {
 
 				data := d.getListenerData()
 				if len(data) == 0 || data == nil {
+					time.Sleep(5 * time.Millisecond)
 					continue
 				}
 

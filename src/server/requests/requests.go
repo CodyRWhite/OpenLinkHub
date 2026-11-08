@@ -5,12 +5,16 @@ package requests
 // License: GPL-3.0 or later
 
 import (
+	"OpenLinkHub/src/applications"
+	"OpenLinkHub/src/appmonitor"
 	"OpenLinkHub/src/audio"
 	"OpenLinkHub/src/common"
 	"OpenLinkHub/src/config"
 	"OpenLinkHub/src/dashboard"
 	"OpenLinkHub/src/devices"
 	"OpenLinkHub/src/devices/lcd"
+	"OpenLinkHub/src/devices/nexus"
+	"OpenLinkHub/src/devices/xeneonedge"
 	"OpenLinkHub/src/display"
 	"OpenLinkHub/src/inputmanager"
 	"OpenLinkHub/src/keyboards"
@@ -23,8 +27,11 @@ import (
 	"OpenLinkHub/src/temperatures"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/crypto/bcrypt"
 	"net/http"
 	"reflect"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Payload contains data from a client about device speed change
@@ -79,6 +86,7 @@ type Payload struct {
 	KeyId                         int                   `json:"keyId"`
 	AreaId                        int                   `json:"areaId"`
 	DeviceAmount                  int                   `json:"deviceAmount"`
+	CustomLedCount                int                   `json:"customLedCount"`
 	PortId                        int                   `json:"portId"`
 	UserProfileName               string                `json:"userProfileName"`
 	LcdSerial                     string                `json:"lcdSerial"`
@@ -118,6 +126,8 @@ type Payload struct {
 	RgbOn                         string                `json:"rgbOn"`
 	LcdControl                    bool                  `json:"lcdControl"`
 	Brightness                    uint8                 `json:"brightness"`
+	Contrast                      uint8                 `json:"contrast"`
+	Backlight                     uint8                 `json:"backlight"`
 	Position                      int                   `json:"position"`
 	Positions                     []string              `json:"positions"`
 	DeviceIdString                string                `json:"deviceIdString"`
@@ -191,6 +201,12 @@ type Payload struct {
 	MousePositionAbsolute         bool                  `json:"mousePositionAbsolute"`
 	MacroRepeat                   int                   `json:"macroRepeat"`
 	MacroRepeatDelay              int                   `json:"macroRepeatDelay"`
+	WidgetId                      int                   `json:"widgetId"`
+	Widget                        xeneonedge.Widget     `json:"widget"`
+	ColorTone                     int                   `json:"colorTone"`
+	ColorToneType                 int                   `json:"colorToneType"`
+	Screen                        nexus.Screen          `json:"screen"`
+	Id                            string                `json:"id"`
 	Status                        int
 	Code                          int
 	Message                       string
@@ -602,7 +618,7 @@ func ProcessOperatingMode(r *http.Request) *Payload {
 		}
 	}
 
-	if req.OperatingMode < 1 || req.OperatingMode > 2 {
+	if req.OperatingMode < 0 || req.OperatingMode > 5 {
 		return &Payload{Message: language.GetValue("txtUnableToValidateRequest"), Code: http.StatusOK, Status: 0}
 	}
 
@@ -799,6 +815,57 @@ func ProcessLcdChange(r *http.Request) *Payload {
 		}
 	}
 	return &Payload{Message: language.GetValue("txtUnableToChangeLcdMode"), Code: http.StatusOK, Status: 0}
+}
+
+// ProcessSaveNexusScreen saves a custom layout and selects it on the device.
+func ProcessSaveNexusScreen(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"SaveDeviceScreen",
+		req.Id,
+		req.Screen,
+	)
+
+	if len(results) > 0 && results[0].Uint() == 1 {
+		return &Payload{Message: language.GetValue("txtLcdProfileUpdated"), Code: http.StatusOK, Status: 1}
+	}
+	return &Payload{Message: language.GetValue("txtUnableToChangeLcdProfile"), Code: http.StatusOK, Status: 0}
+}
+
+// ProcessDeleteNexusScreen deletes a custom layout and selects it on the device.
+func ProcessDeleteNexusScreen(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"DeleteDeviceScreen",
+		req.Id,
+	)
+
+	if len(results) > 0 && results[0].Uint() == 1 {
+		return &Payload{Message: language.GetValue("txtLcdProfileUpdated"), Code: http.StatusOK, Status: 1}
+	}
+	return &Payload{Message: language.GetValue("txtUnableToChangeLcdProfile"), Code: http.StatusOK, Status: 0}
 }
 
 // ProcessLcdProfileChange will process POST request from a client for LCD mode change
@@ -1103,9 +1170,57 @@ func ProcessLcdProfileUpdate(r *http.Request) *Payload {
 		mode.StartColor = req.StartColor
 		mode.EndColor = req.EndColor
 		mode.TextColor = req.TextColor
+		mode.DeviceId = req.DeviceId
+		mode.ChannelId = req.ChannelId
 
 		// Send it
 		status = lcd.SaveArc(mode)
+		break
+	case lcd.DisplayDots:
+		if req.Sensor > 6 {
+			return &Payload{Message: language.GetValue("txtNonExistingSensorId"), Code: http.StatusOK, Status: 0}
+		}
+
+		if req.Margin < 10 || req.Margin > 50 {
+			return &Payload{Message: language.GetValue("txtInvalidMarginValue"), Code: http.StatusOK, Status: 0}
+		}
+
+		// Profile
+		mode := lcd.GetDots()
+		mode.Sensor = req.Sensor
+		mode.Margin = req.Margin
+		mode.Background = req.BackgroundColor
+		mode.StartColor = req.StartColor
+		mode.EndColor = req.EndColor
+		mode.TextColor = req.TextColor
+		mode.DeviceId = req.DeviceId
+		mode.ChannelId = req.ChannelId
+
+		// Send it
+		status = lcd.SaveDots(mode)
+		break
+	case lcd.DisplayFill:
+		if req.Sensor > 6 {
+			return &Payload{Message: language.GetValue("txtNonExistingSensorId"), Code: http.StatusOK, Status: 0}
+		}
+
+		if req.Margin < 10 || req.Margin > 50 {
+			return &Payload{Message: language.GetValue("txtInvalidMarginValue"), Code: http.StatusOK, Status: 0}
+		}
+
+		// Profile
+		mode := lcd.GetFill()
+		mode.Sensor = req.Sensor
+		mode.Margin = req.Margin
+		mode.Background = req.BackgroundColor
+		mode.StartColor = req.StartColor
+		mode.EndColor = req.EndColor
+		mode.TextColor = req.TextColor
+		mode.DeviceId = req.DeviceId
+		mode.ChannelId = req.ChannelId
+
+		// Send it
+		status = lcd.SaveFill(mode)
 		break
 	case lcd.DisplayDoubleArc:
 		thickness := req.Thickness
@@ -1138,6 +1253,8 @@ func ProcessLcdProfileUpdate(r *http.Request) *Payload {
 				StartColor: arc.StartColor,
 				EndColor:   arc.EndColor,
 				TextColor:  arc.TextColor,
+				ChannelId:  arc.ChannelId,
+				DeviceId:   arc.DeviceId,
 			}
 		}
 
@@ -1185,6 +1302,8 @@ func ProcessLcdProfileUpdate(r *http.Request) *Payload {
 				Sensor:    sensorId,
 				TextColor: sensor.TextColor,
 				Enabled:   sensor.Enabled,
+				DeviceId:  sensor.DeviceId,
+				ChannelId: sensor.ChannelId,
 			}
 		}
 
@@ -1990,7 +2109,7 @@ func ProcessChangeKeyAssignment(r *http.Request) *Payload {
 		Default:        req.Enabled,
 		ActionType:     req.KeyAssignmentType,
 		ActionCommand:  req.KeyAssignmentValue,
-		DeviceId:       req.KeyAssignmentValueString, // Sniper
+		DeviceId:       req.KeyAssignmentValueString, // Sniper, Profiles
 		ActionHold:     req.PressAndHold,
 		IsMacro:        req.KeyAssignmentType == 10,
 		ModifierKey:    req.KeyAssignmentModifier,
@@ -2629,6 +2748,190 @@ func ProcessBrightnessChangeGradual(r *http.Request) *Payload {
 	return &Payload{Message: language.GetValue("txtUnableToChangeBrightness"), Code: http.StatusOK, Status: 0}
 }
 
+// ProcessContrastChangeGradual will process POST request from a client for device contrast change via defined number from 0-100
+func ProcessContrastChangeGradual(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if req.Contrast < 0 || req.Contrast > 100 {
+		return &Payload{Message: language.GetValue("txtInvalidContrastValue"), Code: http.StatusOK, Status: 0}
+	}
+
+	if len(req.DeviceId) == 0 {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if !common.AlphanumericDashRegex.MatchString(req.DeviceId) {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if devices.GetDevice(req.DeviceId) == nil {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"ChangeDeviceContrastValue",
+		req.Contrast,
+	)
+
+	if len(results) > 0 {
+		switch results[0].Uint() {
+		case 1:
+			return &Payload{Message: language.GetValue("txtContrastChanged"), Code: http.StatusOK, Status: 1}
+		case 2:
+			return &Payload{Message: language.GetValue("txtUnableToUpdateContrast"), Code: http.StatusOK, Status: 0}
+		}
+	}
+	return &Payload{Message: language.GetValue("txtUnableToUpdateContrast"), Code: http.StatusOK, Status: 0}
+}
+
+// ProcessBacklightChangeGradual will process POST request from a client for device backlight change via defined number from 0-100
+func ProcessBacklightChangeGradual(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if req.Backlight < 0 || req.Backlight > 100 {
+		return &Payload{Message: language.GetValue("txtInvalidBacklightValue"), Code: http.StatusOK, Status: 0}
+	}
+
+	if len(req.DeviceId) == 0 {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if !common.AlphanumericDashRegex.MatchString(req.DeviceId) {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if devices.GetDevice(req.DeviceId) == nil {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"ChangeDeviceBacklightValue",
+		req.Backlight,
+	)
+
+	if len(results) > 0 {
+		switch results[0].Uint() {
+		case 1:
+			return &Payload{Message: language.GetValue("txtBacklightChanged"), Code: http.StatusOK, Status: 1}
+		case 2:
+			return &Payload{Message: language.GetValue("txtUnableToUpdateBacklight"), Code: http.StatusOK, Status: 0}
+		}
+	}
+	return &Payload{Message: language.GetValue("txtUnableToUpdateBacklight"), Code: http.StatusOK, Status: 0}
+}
+
+// ProcessColortoneChange will process POST request from a client for device color zone change via defined number from 0-255
+func ProcessColortoneChange(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if req.ColorTone < 0 || req.ColorTone > 255 {
+		return &Payload{Message: language.GetValue("txtInvalidColorToneValue"), Code: http.StatusOK, Status: 0}
+	}
+
+	if req.ColorToneType < 0 || req.ColorToneType > 2 {
+		return &Payload{Message: language.GetValue("txtInvalidColorToneValue"), Code: http.StatusOK, Status: 0}
+	}
+
+	if len(req.DeviceId) == 0 {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if !common.AlphanumericDashRegex.MatchString(req.DeviceId) {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if devices.GetDevice(req.DeviceId) == nil {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"ChangeDeviceColorToneValue",
+		req.ColorTone,
+		req.ColorToneType,
+	)
+
+	if len(results) > 0 {
+		switch results[0].Uint() {
+		case 1:
+			return &Payload{Message: language.GetValue("txtColortoneChanged"), Code: http.StatusOK, Status: 1}
+		case 2:
+			return &Payload{Message: language.GetValue("txtUnableToUpdateColortone"), Code: http.StatusOK, Status: 0}
+		}
+	}
+	return &Payload{Message: language.GetValue("txtUnableToUpdateColortone"), Code: http.StatusOK, Status: 0}
+}
+
+// ProcessDeviceSettingsReset will process POST request from a client for device settings reset
+func ProcessDeviceSettingsReset(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if len(req.DeviceId) == 0 {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if !common.AlphanumericDashRegex.MatchString(req.DeviceId) {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if devices.GetDevice(req.DeviceId) == nil {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"ResetDeviceSettings",
+	)
+
+	if len(results) > 0 {
+		switch results[0].Uint() {
+		case 1:
+			return &Payload{Message: language.GetValue("txtSettingsReset"), Code: http.StatusOK, Status: 1}
+		case 2:
+			return &Payload{Message: language.GetValue("txtUnableToResetSettings"), Code: http.StatusOK, Status: 0}
+		}
+	}
+	return &Payload{Message: language.GetValue("txtUnableToResetSettings"), Code: http.StatusOK, Status: 0}
+}
+
 // ProcessPositionChange will process POST request from a client for device position change
 func ProcessPositionChange(r *http.Request) *Payload {
 	req := &Payload{}
@@ -2970,7 +3273,7 @@ func ProcessHardwareChangeColor(r *http.Request) *Payload {
 		}
 	}
 
-	if req.HardwareLight < 0 || req.HardwareLight > 8 {
+	if req.HardwareLight < 0 || req.HardwareLight > 9 {
 		return &Payload{Message: language.GetValue("txtNonExistingHwProfile"), Code: http.StatusOK, Status: 0}
 	}
 
@@ -3329,6 +3632,49 @@ func ProcessExternalHubDeviceAmount(r *http.Request) *Payload {
 		"UpdateExternalHubDeviceAmount",
 		req.PortId,
 		req.DeviceAmount,
+	)
+
+	if len(results) > 0 {
+		switch results[0].Uint() {
+		case 0:
+			return &Payload{Message: language.GetValue("txtUnableToChangeDeviceAmount"), Code: http.StatusOK, Status: 0}
+		case 1:
+			return &Payload{Message: language.GetValue("txtExternalLedAmountUpdated"), Code: http.StatusOK, Status: 1}
+		case 2:
+			return &Payload{Message: language.GetValue("txtTooMuchLedChannels"), Code: http.StatusOK, Status: 0}
+		}
+	}
+	return &Payload{Message: language.GetValue("txtUnableToChangeDeviceAmount"), Code: http.StatusOK, Status: 0}
+}
+
+// ProcessExternalHubCustomLedCount will process POST request from a client for custom LED count change
+func ProcessExternalHubCustomLedCount(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if req.CustomLedCount < 0 || req.CustomLedCount > 204 {
+		return &Payload{Message: language.GetValue("txtTooMuchLedChannels"), Code: http.StatusOK, Status: 0}
+	}
+	if req.PortId < 0 || req.PortId > 1 {
+		return &Payload{Message: language.GetValue("txtNonExistingLedPort"), Code: http.StatusOK, Status: 0}
+	}
+	if devices.GetDevice(req.DeviceId) == nil {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"UpdateExternalHubCustomLedCount",
+		req.PortId,
+		req.CustomLedCount,
 	)
 
 	if len(results) > 0 {
@@ -4502,6 +4848,120 @@ func ProcessGetRgbOverride(r *http.Request) *Payload {
 	}
 }
 
+// ProcessGetRgbTimewarp will process getting data for RGB timewarp
+func ProcessGetRgbTimewarp(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if len(req.DeviceId) == 0 {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if !common.AlphanumericRegex.MatchString(req.DeviceId) {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if devices.GetDevice(req.DeviceId) == nil {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if req.ChannelId < 0 {
+		return &Payload{Message: language.GetValue("txtNonExistingChannelId"), Code: http.StatusOK, Status: 0}
+	}
+
+	if req.SubDeviceId < 0 {
+		return &Payload{Message: language.GetValue("txtNonExistingChannelId"), Code: http.StatusOK, Status: 0}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"ProcessGetRgbTimewarp",
+		req.ChannelId,
+	)
+
+	if len(results) > 0 {
+		return &Payload{
+			Data:   results[0].Interface(),
+			Code:   http.StatusOK,
+			Status: 1,
+		}
+	} else {
+		return &Payload{
+			Data:   language.GetValue("txtNoRgbTimewarp"),
+			Code:   http.StatusOK,
+			Status: 0,
+		}
+	}
+}
+
+// ProcessSetRgbTimewarp will process setting RGB timewarp
+func ProcessSetRgbTimewarp(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if len(req.DeviceId) == 0 {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if !common.AlphanumericRegex.MatchString(req.DeviceId) {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if devices.GetDevice(req.DeviceId) == nil {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if req.ChannelId < 0 {
+		return &Payload{Message: language.GetValue("txtNonExistingChannelId"), Code: http.StatusOK, Status: 0}
+	}
+
+	if req.Speed < 0 || req.Speed > 2 {
+		return &Payload{Message: language.GetValue("txtInvalidSpeedValue"), Code: http.StatusOK, Status: 0}
+	}
+
+	if req.Direction < 1 || req.Direction > 3 {
+		return &Payload{Message: language.GetValue("txtNonExistingDirection"), Code: http.StatusOK, Status: 0}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"ProcessSetRgbTimewarp",
+		req.ChannelId,
+		req.Enabled,
+		req.StartColor,
+		req.Speed,
+		req.Direction,
+	)
+
+	if len(results) > 0 {
+		switch results[0].Uint() {
+		case 1:
+			return &Payload{Message: language.GetValue("txtTimeWarpUpdated"), Code: http.StatusOK, Status: 1}
+		case 2:
+			return &Payload{Message: language.GetValue("txtUnableToChangeRgbTimewarpOpenRgb"), Code: http.StatusOK, Status: 0}
+		case 3:
+			return &Payload{Message: language.GetValue("txtUnableToChangeRgbTimewarpCluster"), Code: http.StatusOK, Status: 0}
+		}
+	}
+	return &Payload{Message: language.GetValue("txtUnableToUpdateRgbTimewarp"), Code: http.StatusOK, Status: 0}
+}
+
 // ProcessSetRgbOverride will process setting RGB override
 func ProcessSetRgbOverride(r *http.Request) *Payload {
 	req := &Payload{}
@@ -4531,7 +4991,7 @@ func ProcessSetRgbOverride(r *http.Request) *Payload {
 		return &Payload{Message: language.GetValue("txtNonExistingChannelId"), Code: http.StatusOK, Status: 0}
 	}
 
-	if req.Speed < 0 || req.Speed > 10 {
+	if req.Speed < 0 || req.Speed > 2 {
 		return &Payload{Message: language.GetValue("txtInvalidSpeedValue"), Code: http.StatusOK, Status: 0}
 	}
 
@@ -4773,6 +5233,8 @@ func ProcessSetOpenRgbIntegration(r *http.Request) *Payload {
 			return &Payload{Message: language.GetValue("txtOpenRGBIntegrationEnabled"), Code: http.StatusOK, Status: 1}
 		case 2:
 			return &Payload{Message: language.GetValue("txtOpenRGBClusterEnabled"), Code: http.StatusOK, Status: 0}
+		case 3:
+			return &Payload{Message: language.GetValue("txtUnableToChangeOpenRgbRgbTimewarp"), Code: http.StatusOK, Status: 0}
 		}
 	}
 	return &Payload{Message: language.GetValue("txtOpenRGBIntegrationError"), Code: http.StatusOK, Status: 0}
@@ -4817,6 +5279,8 @@ func ProcessSetRgbCluster(r *http.Request) *Payload {
 			return &Payload{Message: language.GetValue("txtRgbClusterAdded"), Code: http.StatusOK, Status: 1}
 		case 2:
 			return &Payload{Message: language.GetValue("txtRgbClusterORGB"), Code: http.StatusOK, Status: 0}
+		case 3:
+			return &Payload{Message: language.GetValue("txtUnableToChangeClusterRgbTimewarp"), Code: http.StatusOK, Status: 0}
 		}
 	}
 
@@ -5494,4 +5958,633 @@ func ProcessSetAllDevicesColor(r *http.Request) *Payload {
 	}
 	devices.UpdateAllDevicesStaticColor(req.Color)
 	return &Payload{Message: language.GetValue("txtDeviceRgbProfileChanged"), Code: http.StatusOK, Status: 1}
+}
+
+// ProcessGetXeneonWidget will process POST request from a client to get xeneon widget data
+func ProcessGetXeneonWidget(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if len(req.DeviceId) == 0 {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if !common.AlphanumericRegex.MatchString(req.DeviceId) {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if devices.GetDevice(req.DeviceId) == nil {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if req.WidgetId < 0 {
+		return &Payload{Message: language.GetValue("txtNonExistingChannelId"), Code: http.StatusOK, Status: 0}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"ProcessGetWidget",
+		req.WidgetId,
+	)
+
+	if len(results) > 0 && !results[0].IsNil() {
+		return &Payload{
+			Data:   results[0].Interface(),
+			Code:   http.StatusOK,
+			Status: 1,
+		}
+	} else {
+		return &Payload{
+			Data:   language.GetValue("txtInvalidWidget"),
+			Code:   http.StatusOK,
+			Status: 0,
+		}
+	}
+}
+
+// ProcessSetXeneonWidgetArea will process POST request from a client to assign a widget
+func ProcessSetXeneonWidgetArea(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if !common.AlphanumericRegex.MatchString(req.DeviceId) || devices.GetDevice(req.DeviceId) == nil {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"ProcessSetWidgetArea",
+		req.AreaId,
+		req.WidgetId,
+	)
+	if len(results) > 0 && results[0].Uint() == 1 {
+		return &Payload{Message: language.GetValue("txtXeneonWidgetSaved"), Code: http.StatusOK, Status: 1}
+	}
+
+	return &Payload{Message: language.GetValue("txtInvalidWidget"), Code: http.StatusOK, Status: 0}
+}
+
+// ProcessSaveXeneonWidget will process POST request from a client to save xeneon widget data
+func ProcessSaveXeneonWidget(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if !common.AlphanumericRegex.MatchString(req.DeviceId) || devices.GetDevice(req.DeviceId) == nil {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"ProcessSaveWidget",
+		req.Widget,
+	)
+	if len(results) > 0 && results[0].Uint() == 1 {
+		return &Payload{Message: language.GetValue("txtXeneonWidgetSaved"), Code: http.StatusOK, Status: 1}
+	}
+
+	return &Payload{Message: language.GetValue("txtXeneonWidgetSaveFailed"), Code: http.StatusOK, Status: 0}
+}
+
+// ProcessGetHardwareLights will process POST request from a client to get device hardware lights
+func ProcessGetHardwareLights(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if len(req.DeviceId) == 0 {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if !common.AlphanumericRegex.MatchString(req.DeviceId) {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if devices.GetDevice(req.DeviceId) == nil {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"GetHardwareLights",
+	)
+
+	if len(results) > 0 {
+		return &Payload{
+			Data:   results[0].Interface(),
+			Code:   http.StatusOK,
+			Status: 1,
+		}
+	} else {
+		return &Payload{
+			Data:   language.GetValue("txtNonExistingDevice"),
+			Code:   http.StatusOK,
+			Status: 0,
+		}
+	}
+}
+
+// ProcessSetHardwareLights will process POST request from a client to set device hardware lights
+func ProcessSetHardwareLights(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if len(req.DeviceId) == 0 {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if !common.AlphanumericRegex.MatchString(req.DeviceId) {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if devices.GetDevice(req.DeviceId) == nil {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"SetHardwareLights",
+		req.KeyId,
+		req.StartColor,
+		req.EndColor,
+		req.AlternateColors,
+		req.Direction,
+		req.Speed,
+	)
+
+	if len(results) > 0 {
+		switch results[0].Uint() {
+		case 0:
+			return &Payload{Message: language.GetValue("txtUnableToUpdateHardwareLight"), Code: http.StatusOK, Status: 0}
+		case 1:
+			return &Payload{Message: language.GetValue("txtHardwareLightUpdated"), Code: http.StatusOK, Status: 1}
+		}
+	}
+	return &Payload{Message: language.GetValue("txtUnableToUpdateHardwareLight"), Code: http.StatusOK, Status: 0}
+}
+
+// ProcessSetHardwareLight will process POST request from a client to set device hardware light profile
+func ProcessSetHardwareLight(r *http.Request) *Payload {
+	req := &Payload{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if len(req.DeviceId) == 0 {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if !common.AlphanumericRegex.MatchString(req.DeviceId) {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	if devices.GetDevice(req.DeviceId) == nil {
+		return &Payload{Message: language.GetValue("txtNonExistingDevice"), Code: http.StatusOK, Status: 0}
+	}
+
+	results := devices.CallDeviceMethod(
+		req.DeviceId,
+		"SetHardwareLight",
+		req.HardwareLight,
+	)
+
+	if len(results) > 0 {
+		switch results[0].Uint() {
+		case 0:
+			return &Payload{Message: language.GetValue("txtUnableToUpdateHardwareLight"), Code: http.StatusOK, Status: 0}
+		case 1:
+			return &Payload{Message: language.GetValue("txtHardwareLightUpdated"), Code: http.StatusOK, Status: 1}
+		}
+	}
+	return &Payload{Message: language.GetValue("txtUnableToUpdateHardwareLight"), Code: http.StatusOK, Status: 0}
+}
+
+// ProcessAuthSettings will process POST request from a client to set auth settings
+func ProcessAuthSettings(r *http.Request) *Payload {
+	req := &dashboard.Dashboard{}
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		logger.Log(map[string]interface{}{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if len(req.AuthUsername) < 3 {
+		return &Payload{
+			Message: language.GetValue("txtAuthUsernameTooShort"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	for _, character := range req.AuthUsername {
+		if !((character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9')) {
+			return &Payload{
+				Message: language.GetValue("txtAuthUsernameInvalid"),
+				Code:    http.StatusOK,
+				Status:  0,
+			}
+		}
+	}
+
+	var hash []byte
+	if req.AuthEnabled {
+		if !utf8.ValidString(req.AuthPassword) ||
+			utf8.RuneCountInString(req.AuthPassword) < 12 ||
+			len(req.AuthPassword) > 72 {
+			return &Payload{
+				Message: language.GetValue("txtAuthPasswordLength"),
+				Code:    http.StatusOK,
+				Status:  0,
+			}
+		}
+
+		hasLetter := false
+		hasNumber := false
+		hasSpecial := false
+
+		for _, character := range req.AuthPassword {
+			if unicode.IsControl(character) {
+				return &Payload{
+					Message: language.GetValue("txtAuthPasswordInvalid"),
+					Code:    http.StatusOK,
+					Status:  0,
+				}
+			}
+
+			if unicode.IsLetter(character) {
+				hasLetter = true
+			}
+			if unicode.IsDigit(character) {
+				hasNumber = true
+			}
+			if unicode.IsPunct(character) || unicode.IsSymbol(character) {
+				hasSpecial = true
+			}
+		}
+
+		if !hasLetter || !hasNumber || !hasSpecial {
+			return &Payload{
+				Message: language.GetValue("txtAuthPasswordPolicy"),
+				Code:    http.StatusOK,
+				Status:  0,
+			}
+		}
+
+		hash, err = bcrypt.GenerateFromPassword([]byte(req.AuthPassword), 12)
+		if err != nil {
+			return &Payload{
+				Message: language.GetValue("txtUnableToUpdateDashboardAuth"),
+				Code:    http.StatusOK,
+				Status:  0,
+			}
+		}
+	}
+
+	if req.SessionLifetime < 15 || req.SessionLifetime > 240 {
+		return &Payload{
+			Message: language.GetValue("txtAuthSessionLifetimeInvalid"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if !common.ValidAuthOrigin(req.AuthOrigin) {
+		return &Payload{
+			Message: language.GetValue("txtAuthOriginInvalid"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	dash := dashboard.GetDashboard()
+	dash.AuthEnabled = req.AuthEnabled
+	dash.AuthUsername = req.AuthUsername
+	dash.AuthOrigin = req.AuthOrigin
+	dash.AuthPassword = string(hash)
+	dash.SessionLifetime = req.SessionLifetime
+
+	status := dashboard.SaveDashboardSettings(dash, true)
+	switch status {
+	case 0:
+		return &Payload{Message: language.GetValue("txtUnableToUpdateDashboardAuth"), Code: http.StatusOK, Status: 0}
+	case 1:
+		return &Payload{Message: language.GetValue("txtDashboardAuthUpdated"), Code: http.StatusOK, Status: 1}
+	}
+	return &Payload{Message: language.GetValue("txtUnableToUpdateDashboardAuth"), Code: http.StatusOK, Status: 0}
+}
+
+// ProcessSaveApplicationProfile will process POST request to save application profile settings
+func ProcessSaveApplicationProfile(r *http.Request) *Payload {
+	req := &appmonitor.ApplicationProfile{}
+	if err := json.NewDecoder(r.Body).Decode(req); err != nil {
+		logger.Log(logger.Fields{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if !common.AlphanumericDashRegex.MatchString(req.ApplicationId) {
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	application := applications.GetApplicationById(req.ApplicationId)
+	if application == nil {
+		return &Payload{
+			Message: language.GetValue("txtAppsSaveFailed"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	req.ApplicationName = application.Name
+
+	for _, assignments := range []map[string]string{
+		req.ActiveProfiles,
+		req.PassiveProfiles,
+	} {
+		for serial, profileName := range assignments {
+			if !common.AlphanumericDashRegex.MatchString(serial) {
+				return &Payload{
+					Message: language.GetValue("txtNonExistingDevice"),
+					Code:    http.StatusOK,
+					Status:  0,
+				}
+			}
+
+			if !common.AlphanumericRegex.MatchString(profileName) {
+				return &Payload{
+					Message: language.GetValue("txtProfileOnlyLettersNumbers"),
+					Code:    http.StatusOK,
+					Status:  0,
+				}
+			}
+
+			device := devices.GetDevice(serial)
+			if device == nil {
+				return &Payload{
+					Message: language.GetValue("txtNonExistingDevice"),
+					Code:    http.StatusOK,
+					Status:  0,
+				}
+			}
+
+			value := reflect.ValueOf(device)
+			if value.Kind() == reflect.Ptr && !value.IsNil() {
+				value = value.Elem()
+			}
+
+			valid := false
+			if value.Kind() == reflect.Struct {
+				profiles := value.FieldByName("UserProfiles")
+				if profiles.IsValid() &&
+					profiles.Kind() == reflect.Map &&
+					profiles.Type().Key() == reflect.TypeOf("") {
+					valid = profiles.MapIndex(reflect.ValueOf(profileName)).IsValid()
+				}
+			}
+
+			if !valid {
+				logger.Log(logger.Fields{
+					"deviceId": serial,
+					"profile":  profileName,
+				}).Warn("Application profile references an unknown device profile")
+
+				return &Payload{
+					Message: language.GetValue("txtUnableToChangeUserProfile"),
+					Code:    http.StatusOK,
+					Status:  0,
+				}
+			}
+		}
+	}
+
+	status := appmonitor.UpdateApplicationProfile(*req)
+	switch status {
+	case 1:
+		return &Payload{
+			Message: language.GetValue("txtAppsSaved"),
+			Code:    http.StatusOK,
+			Status:  1,
+		}
+	default:
+		return &Payload{
+			Message: language.GetValue("txtAppsSaveFailed"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+}
+
+// ProcessNewApplicationProfile will process POST request to create an application profile
+func ProcessNewApplicationProfile(r *http.Request) *Payload {
+	req := &appmonitor.ApplicationProfile{}
+	if err := json.NewDecoder(r.Body).Decode(req); err != nil {
+		logger.Log(logger.Fields{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if !common.AlphanumericDashRegex.MatchString(req.ApplicationId) {
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	application := applications.GetApplicationById(req.ApplicationId)
+	if application == nil {
+		return &Payload{
+			Message: language.GetValue("txtAppsSaveFailed"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	req.ApplicationName = application.Name
+
+	for _, assignments := range []map[string]string{
+		req.ActiveProfiles,
+		req.PassiveProfiles,
+	} {
+		for serial, profileName := range assignments {
+			if !common.AlphanumericDashRegex.MatchString(serial) {
+				return &Payload{
+					Message: language.GetValue("txtNonExistingDevice"),
+					Code:    http.StatusOK,
+					Status:  0,
+				}
+			}
+
+			if !common.AlphanumericRegex.MatchString(profileName) {
+				return &Payload{
+					Message: language.GetValue("txtProfileOnlyLettersNumbers"),
+					Code:    http.StatusOK,
+					Status:  0,
+				}
+			}
+
+			device := devices.GetDevice(serial)
+			if device == nil {
+				return &Payload{
+					Message: language.GetValue("txtNonExistingDevice"),
+					Code:    http.StatusOK,
+					Status:  0,
+				}
+			}
+
+			value := reflect.ValueOf(device)
+			if value.Kind() == reflect.Ptr && !value.IsNil() {
+				value = value.Elem()
+			}
+
+			valid := false
+			if value.Kind() == reflect.Struct {
+				profiles := value.FieldByName("UserProfiles")
+				if profiles.IsValid() &&
+					profiles.Kind() == reflect.Map &&
+					profiles.Type().Key() == reflect.TypeOf("") {
+					valid = profiles.MapIndex(reflect.ValueOf(profileName)).IsValid()
+				}
+			}
+
+			if !valid {
+				logger.Log(logger.Fields{
+					"deviceId": serial,
+					"profile":  profileName,
+				}).Warn("Application profile references an unknown device profile")
+
+				return &Payload{
+					Message: language.GetValue("txtUnableToChangeUserProfile"),
+					Code:    http.StatusOK,
+					Status:  0,
+				}
+			}
+		}
+	}
+
+	if req.ActiveProfiles == nil {
+		req.ActiveProfiles = make(map[string]string)
+	}
+	if req.PassiveProfiles == nil {
+		req.PassiveProfiles = make(map[string]string)
+	}
+
+	status := appmonitor.AddApplicationProfile(*req)
+	switch status {
+	case 1:
+		return &Payload{
+			Message: language.GetValue("txtAppsSaved"),
+			Code:    http.StatusOK,
+			Status:  1,
+		}
+	case 2:
+		return &Payload{
+			Message: language.GetValue("txtAppsAlreadyExists"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	default:
+		return &Payload{
+			Message: language.GetValue("txtAppsSaveFailed"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+}
+
+// ProcessDeleteApplicationProfile will process POST request to delete an application profile
+func ProcessDeleteApplicationProfile(r *http.Request) *Payload {
+	req := &appmonitor.ApplicationProfile{}
+	if err := json.NewDecoder(r.Body).Decode(req); err != nil {
+		logger.Log(logger.Fields{"error": err}).Error("Unable to decode JSON")
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	if !common.AlphanumericDashRegex.MatchString(req.ApplicationId) {
+		return &Payload{
+			Message: language.GetValue("txtUnableToValidateRequest"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
+
+	status := appmonitor.DeleteApplicationProfile(req.ApplicationId)
+	switch status {
+	case 1:
+		return &Payload{
+			Message: language.GetValue("txtAppsDeleted"),
+			Code:    http.StatusOK,
+			Status:  1,
+		}
+	default:
+		return &Payload{
+			Message: language.GetValue("txtAppsDeleteFailed"),
+			Code:    http.StatusOK,
+			Status:  0,
+		}
+	}
 }
