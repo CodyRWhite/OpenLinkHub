@@ -479,6 +479,23 @@ func (d *Device) commitHardwareLighting() int {
 	return len(ports)
 }
 
+// GetCommonRgbProfile returns the RGB profile shared by every lit fan, or "" when the fans
+// use different profiles. The Commander PRO page uses it to preselect the global RGB dropdown.
+func (d *Device) GetCommonRgbProfile() string {
+	shared := ""
+	for _, device := range d.Devices {
+		if device.LedChannels == 0 || device.RGB == "" {
+			continue // speed-only fan headers have no lighting profile
+		}
+		if shared == "" {
+			shared = device.RGB
+		} else if device.RGB != shared {
+			return ""
+		}
+	}
+	return shared
+}
+
 // SaveHardwareLighting stores the lighting currently set on the page in the controller
 // (same as what happens on shutdown), then hands the LED ports back to software control.
 func (d *Device) SaveHardwareLighting() uint8 {
