@@ -19,6 +19,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -600,7 +601,14 @@ func (d *Device) getDevices() int {
 
 	mobo := motherboards.GetMotherboard()
 	if mobo != nil {
-		for i := 1; i <= len(mobo.Headers); i++ {
+		// Header IDs need not be contiguous: a board definition only lists headers
+		// that physically exist (e.g. 1, 2 and 7).
+		headerIds := make([]int, 0, len(mobo.Headers))
+		for id := range mobo.Headers {
+			headerIds = append(headerIds, id)
+		}
+		sort.Ints(headerIds)
+		for _, i := range headerIds {
 			speedProfile := "Normal"
 			label := "Set Label"
 			headerMode := motherboards.GetMotherboardHeaderMode(i)

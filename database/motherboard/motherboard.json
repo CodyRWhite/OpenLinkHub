@@ -344,50 +344,6 @@
           },
           "headerValue": "pwm2"
         },
-        "3": {
-          "id": 3,
-          "headerName": "Fan 3",
-          "headerInput": "fan3_input",
-          "headerConfig": "pwm3_enable",
-          "headerModes": {
-            "1": "PWM",
-            "2": "BIOS"
-          },
-          "headerValue": "pwm3"
-        },
-        "4": {
-          "id": 4,
-          "headerName": "Fan 4",
-          "headerInput": "fan4_input",
-          "headerConfig": "pwm4_enable",
-          "headerModes": {
-            "1": "PWM",
-            "2": "BIOS"
-          },
-          "headerValue": "pwm4"
-        },
-        "5": {
-          "id": 5,
-          "headerName": "Fan 5",
-          "headerInput": "fan5_input",
-          "headerConfig": "pwm5_enable",
-          "headerModes": {
-            "1": "PWM",
-            "2": "BIOS"
-          },
-          "headerValue": "pwm5"
-        },
-        "6": {
-          "id": 6,
-          "headerName": "Fan 6",
-          "headerInput": "fan6_input",
-          "headerConfig": "pwm6_enable",
-          "headerModes": {
-            "1": "PWM",
-            "2": "BIOS"
-          },
-          "headerValue": "pwm6"
-        },
         "7": {
           "id": 7,
           "headerName": "AIO Pump (AIO_PUMP)",

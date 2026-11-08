@@ -202,6 +202,11 @@ func GetMotherboardHeaderLabel(header int) string {
 		return ""
 	}
 
+	if len(val.HeaderLabel) == 0 {
+		// Board definition has no hwmon label file for this header; keep its headerName
+		return ""
+	}
+
 	headerLabel := filepath.Join(hwmonPath, strings.TrimPrefix(val.HeaderLabel, "/"))
 
 	if common.FileExists(headerLabel) {
