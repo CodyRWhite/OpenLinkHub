@@ -321,6 +321,8 @@ type Device struct {
 	RGBModes            []string
 	queue               chan []byte
 	instance            *common.Device
+	lastSpeed           map[int]byte // last percent duty applied per channel (0 = pump), for the hardware speed save
+	speedLock           sync.Mutex   // guards lastSpeed
 }
 
 /*
@@ -433,27 +435,28 @@ func Init(vendorId, productId uint16, serial, path string) *common.Device {
 	}
 
 	// Bootstrap
-	d.getDebugMode()        // Debug mode
-	d.getManufacturer()     // Manufacturer
-	d.getProduct()          // Product
-	d.getSerial()           // Serial
-	d.loadRgb()             // Load RGB
-	d.loadDeviceProfiles()  // Load all device profiles
-	d.getDeviceLcd()        // Check if LCD pump cover is installed
-	d.getDeviceProfile()    // Get device profile if any
-	d.getDeviceFirmware()   // Firmware
-	d.setSoftwareMode()     // Activate software mode
-	d.initLedPorts()        // Init LED ports
-	d.getDeviceType()       // Find an AIO device type
-	d.getLedDevices()       // Get LED devices
-	d.getDevices()          // Get devices connected to a hub
-	d.getRgbDevices()       // Get RGB devices connected to a hub
-	d.saveDeviceProfile()   // Save
-	d.setColorEndpoint()    // Set device color endpoint
-	d.setDefaults()         // Set default speed and color values for fans and pumps
-	d.setAutoRefresh()      // Set auto device refresh
-	d.getTemperatureProbe() // Devices with temperature probes
-	d.resetLEDPorts()       // Reset device LED
+	d.getDebugMode()           // Debug mode
+	d.getManufacturer()        // Manufacturer
+	d.getProduct()             // Product
+	d.getSerial()              // Serial
+	d.loadRgb()                // Load RGB
+	d.loadDeviceProfiles()     // Load all device profiles
+	d.getDeviceLcd()           // Check if LCD pump cover is installed
+	d.getDeviceProfile()       // Get device profile if any
+	d.getDeviceFirmware()      // Firmware
+	d.setSoftwareMode()        // Activate software mode
+	d.initLedPorts()           // Init LED ports
+	d.getDeviceType()          // Find an AIO device type
+	d.getLedDevices()          // Get LED devices
+	d.getDevices()             // Get devices connected to a hub
+	d.getRgbDevices()          // Get RGB devices connected to a hub
+	d.saveDeviceProfile()      // Save
+	d.logHardwareSpeedConfig() // Read-only: log the hardware (power-on) speed config; before the color endpoint opens
+	d.setColorEndpoint()       // Set device color endpoint
+	d.setDefaults()            // Set default speed and color values for fans and pumps
+	d.setAutoRefresh()         // Set auto device refresh
+	d.getTemperatureProbe()    // Devices with temperature probes
+	d.resetLEDPorts()          // Reset device LED
 	if config.GetConfig().Manual {
 		fmt.Println(
 			fmt.Sprintf("[%s [%s]] Manual flag enabled. Process will not monitor temperature or adjust fan speed.", d.Serial, d.Product),
@@ -513,6 +516,7 @@ func (d *Device) GetRgbProfiles() interface{} {
 
 // Stop will stop all device operations and switch a device back to hardware mode
 func (d *Device) Stop() {
+	d.saveHardwareSpeedsOnStop() // must run before Exit is set: transfer stops reading replies after that
 	d.Exit = true
 	logger.Log(logger.Fields{"serial": d.Serial, "product": d.Product}).Info("Stopping device...")
 	if d.activeRgb != nil {
@@ -1698,6 +1702,9 @@ func (d *Device) setSpeed(data map[int]byte, mode uint8) {
 	response := d.write(modeSetSpeed, dataTypeSetSpeed, buffer, true, "setSpeed")
 	if d.Debug {
 		logger.Log(logger.Fields{"serial": d.Serial, "data": fmt.Sprintf("%2x", response), "len": len(response), "device": d.Product}).Info("setSpeed() - Speed")
+	}
+	if mode == 0 { // percent mode: remember it for the hardware speed save
+		d.recordSpeeds(data)
 	}
 
 	if len(response) >= 4 {
