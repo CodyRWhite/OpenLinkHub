@@ -27,6 +27,9 @@ import (
 	"OpenLinkHub/src/smbus"
 	"encoding/json"
 	"os"
+	"os/exec"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -117,6 +120,7 @@ type Device struct {
 	UserProfiles  map[string]*DeviceProfile
 	DeviceProfile *DeviceProfile
 	Rgb           *rgb.RGB
+	RGBModes      []string
 	Template      string
 	activeRgb     *rgb.ActiveRGB
 	deviceLock    sync.Mutex
@@ -223,12 +227,13 @@ func Init() *common.Device {
 	var busPath string
 	var f *os.File
 	var deviceVersion string
-	for i := 0; i < 8; i++ {
-		path := "/dev/i2c-" + itoa(i)
+	adapterIndex := 0
+	for i, path := range nvidiaI2cBuses() {
 		if name, conn, ok := probeBus(path); ok {
 			busPath = path
 			f = conn
 			deviceVersion = name
+			adapterIndex = i
 			break
 		}
 	}
@@ -241,17 +246,17 @@ func Init() *common.Device {
 		dev:           f,
 		busPath:       busPath,
 		DeviceVersion: deviceVersion,
-		Product:       "GPU RGB (ENE)",
+		Product:       "ASUS ROG STRIX LC RTX 3080 Ti",
 		Template:      "gpuene.html",
+		RGBModes:      rgbModes,
 	}
 
-	// Serial is synthesized (this chip has no unique ID we can read) -- stable
-	// across restarts as long as it stays on the same i2c bus, which it will
-	// unless the GPU is physically moved to a different PCIe slot. Must be pure
-	// alphanumeric: common.AlphanumericRegex (used to validate deviceId on every
-	// RGB/override API route) rejects dashes, so a serial like "gpuene--dev-i2c-0"
-	// would register fine but silently fail every API call as "Non-existing device".
-	d.Serial = "gpuene" + strings.TrimPrefix(busPath, "/dev/i2c-")
+	// Serial is synthesized (this chip has no unique ID we can read). It uses the
+	// adapter's position among the NVIDIA i2c adapters, not the kernel bus number,
+	// so it stays stable when other drivers (e.g. an iGPU) shift the bus numbers.
+	// Must be pure alphanumeric: common.AlphanumericRegex (used to validate deviceId
+	// on every RGB/override API route) rejects dashes.
+	d.Serial = "gpuene" + itoa(adapterIndex)
 
 	configTable := make([]byte, 64)
 	for i := 0; i < 64; i++ {
@@ -291,6 +296,56 @@ func Init() *common.Device {
 
 	logger.Log(logger.Fields{"serial": d.Serial, "deviceVersion": d.DeviceVersion, "ledCount": d.LedCount, "bus": busPath}).Info("ENE GPU RGB controller initialized")
 	return d.instance
+}
+
+// nvidiaI2cBuses returns the /dev/i2c-N paths of the NVIDIA GPU's i2c adapters, in
+// bus order. Only these are probed: the ENE probe writes a register-select word, which
+// must never be sent to unrelated buses (motherboard SMBus, iGPU display buses).
+func nvidiaI2cBuses() []string {
+	entries, err := os.ReadDir("/sys/class/i2c-dev")
+	if err != nil {
+		return nil
+	}
+	type bus struct {
+		num  int
+		path string
+	}
+	var buses []bus
+	for _, e := range entries {
+		n, err := strconv.Atoi(strings.TrimPrefix(e.Name(), "i2c-"))
+		if err != nil {
+			continue
+		}
+		name, err := os.ReadFile("/sys/class/i2c-dev/" + e.Name() + "/name")
+		if err != nil || !strings.HasPrefix(strings.TrimSpace(string(name)), "NVIDIA i2c adapter") {
+			continue
+		}
+		buses = append(buses, bus{num: n, path: "/dev/" + e.Name()})
+	}
+	sort.Slice(buses, func(a, b int) bool { return buses[a].num < buses[b].num })
+	paths := make([]string, 0, len(buses))
+	for _, b := range buses {
+		paths = append(paths, b.path)
+	}
+	return paths
+}
+
+// GetFanSpeed returns the GPU fan speed in percent as reported by nvidia-smi, or 0.
+func (d *Device) GetFanSpeed() int {
+	out, err := exec.Command("nvidia-smi", "--query-gpu=fan.speed", "--format=csv,noheader,nounits").Output()
+	if err != nil {
+		return 0
+	}
+	speed, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0
+	}
+	return speed
+}
+
+// ProcessGetRgbOverride returns the RGB override for a channel (used by the override dialog).
+func (d *Device) ProcessGetRgbOverride(channelId, subDeviceId int) interface{} {
+	return d.getRgbOverride(channelId, subDeviceId)
 }
 
 func itoa(i int) string {
