@@ -319,20 +319,19 @@ const (
 	hwModeStatic      = 0x04
 	hwModeMarquee     = 0x07
 	hwModeSequential  = 0x09
-	hwModeRainbow     = 0x0a
 	hwSpeedMedium     = 0x01
 	hwDirForward      = 0x01
 	hwMaxEffects      = 8 // the controller keeps at most 8 effect configs (see liquidctl #154)
 )
 
 // hardwareModeFor maps an OpenLinkHub RGB profile name to the closest effect the
-// controller can run on its own.
+// controller can run on its own. OpenLinkHub's software rainbow spreads the spectrum across a
+// fan's LEDs and rotates it, which matches the controller's Rainbow Wave; its plain Rainbow
+// mode looked like a gradient on LL fans (confirmed on real hardware).
 func hardwareModeFor(profile string) byte {
 	switch profile {
 	case "static", "off":
 		return hwModeStatic
-	case "rainbow", "pastelrainbow":
-		return hwModeRainbow
 	case "colorshift", "colorwarp", "gradient", "nebula", "watercolor":
 		return hwModeColorShift
 	case "colorpulse", "flickering", "storm":
@@ -370,7 +369,7 @@ func (d *Device) hardwareEffectConfig(portId byte, start, count int, profileName
 			profile.StartColor.Brightness = brightness
 			c1 = *rgb.ModifyBrightness(profile.StartColor)
 		}
-	case mode != hwModeRainbow && mode != hwModeRainbowWave:
+	case mode != hwModeRainbowWave:
 		// Colored effects: use the profile's own colors when it has them, else random colors
 		if profile := d.GetRgbProfile(profileName); profile != nil &&
 			(rgb.Color{}) != profile.StartColor && (rgb.Color{}) != profile.EndColor {
