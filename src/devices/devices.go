@@ -22,6 +22,7 @@ import (
 	"OpenLinkHub/src/devices/elite"
 	"OpenLinkHub/src/devices/glaivergb"
 	"OpenLinkHub/src/devices/glaivergbpro"
+	"OpenLinkHub/src/devices/gpuene"
 	"OpenLinkHub/src/devices/harpoonWU"
 	"OpenLinkHub/src/devices/harpoonrgbpro"
 	"OpenLinkHub/src/devices/headsetdongle"
@@ -656,6 +657,15 @@ func Init() {
 			logger.Log(logger.Fields{}).Warn("Unable to get motherboard")
 		} else {
 			devices[motherboards.GetMotherboardSerial()] = motherboard.Init()
+		}
+	}
+
+	// GPU RGB (ENE SMBus controller, e.g. ASUS ROG STRIX LC GeForce RTX 3080 Ti)
+	if config.GetConfig().EnableGpuRGB {
+		if gpu := gpuene.Init(); gpu != nil {
+			devices[gpu.Serial] = gpu
+		} else {
+			logger.Log(logger.Fields{}).Warn("Unable to find a supported GPU RGB controller")
 		}
 	}
 

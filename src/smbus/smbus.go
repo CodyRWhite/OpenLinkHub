@@ -143,6 +143,36 @@ func WriteBlockData(f *os.File, address, register uint8, buf []byte) error {
 	return err
 }
 
+// WriteBlockDataUncached writes a byte array to a register with no dedup cache.
+// WriteBlockData's cache keys only on (address, command) -- fine for callers where
+// that pair uniquely identifies the destination, but wrong for the ENE SMBus
+// protocol (gpuene package), where every register write reuses the same command
+// byte (0x03) and the real destination is a 16-bit register selected via a
+// preceding WriteWord. Two different LEDs getting the same color triplet in a row
+// would otherwise cache-hit and silently skip the second LED's write.
+func WriteBlockDataUncached(f *os.File, address, register uint8, buf []byte) error {
+	if len(buf) > int(i2csmBusMax) {
+		return errors.New("buffer is too long for this type")
+	}
+
+	if err := ioctl(f.Fd(), i2cSlave, uintptr(address)); err != nil {
+		return err
+	}
+
+	data := make([]byte, 1+len(buf), i2csmBusMax+2)
+	data[0] = byte(len(buf))
+	copy(data[1:], buf)
+
+	cmd := i2cCommand{
+		mode:    i2cWrite,
+		command: register,
+		length:  i2cBlockData,
+		pointer: unsafe.Pointer(&data[0]),
+	}
+	ptr := unsafe.Pointer(&cmd)
+	return ioctl(f.Fd(), i2cSmbus, uintptr(ptr))
+}
+
 // ReadRegister will read byte from a register
 func ReadRegister(f *os.File, address, register uint8) (uint8, error) {
 	if err := ioctl(f.Fd(), i2cSlave, uintptr(address)); err != nil {
@@ -176,4 +206,38 @@ func ReadWord(f *os.File, addr, reg uint8) (uint16, error) {
 	ptr := unsafe.Pointer(&cmd)
 	err := ioctl(f.Fd(), i2cSmbus, uintptr(ptr))
 	return v, err
+}
+
+// WriteWord writes a 2-byte word to a designated register. Used by the ENE SMBus
+// protocol (gpuene package) to select a 16-bit target register before a following
+// byte or block write/read -- must not be cached/deduplicated like WriteBlockData,
+// since it is a stateful "select" operation, not idempotent data.
+func WriteWord(f *os.File, addr, reg uint8, value uint16) error {
+	if err := ioctl(f.Fd(), i2cSlave, uintptr(addr)); err != nil {
+		return err
+	}
+	cmd := i2cCommand{
+		mode:    i2cWrite,
+		command: reg,
+		length:  i2cWordData,
+		pointer: unsafe.Pointer(&value),
+	}
+	ptr := unsafe.Pointer(&cmd)
+	return ioctl(f.Fd(), i2cSmbus, uintptr(ptr))
+}
+
+// WriteByte writes a single byte to a register via SMBus byte-data write (no
+// length-prefix, unlike WriteBlockData's block-data write).
+func WriteByte(f *os.File, addr, reg, value uint8) error {
+	if err := ioctl(f.Fd(), i2cSlave, uintptr(addr)); err != nil {
+		return err
+	}
+	cmd := i2cCommand{
+		mode:    i2cWrite,
+		command: reg,
+		length:  i2cByteData,
+		pointer: unsafe.Pointer(&value),
+	}
+	ptr := unsafe.Pointer(&cmd)
+	return ioctl(f.Fd(), i2cSmbus, uintptr(ptr))
 }
