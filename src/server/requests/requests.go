@@ -3320,12 +3320,12 @@ func ProcessSaveHardwareLighting(r *http.Request) *Payload {
 	if len(results) > 0 {
 		switch results[0].Uint() {
 		case 1:
-			return &Payload{Message: "Lighting saved to the controller", Code: http.StatusOK, Status: 1}
+			return &Payload{Message: "Lighting and fan speeds saved to the controller", Code: http.StatusOK, Status: 1}
 		case 2:
-			return &Payload{Message: "No lighting ports are configured on this controller", Code: http.StatusOK, Status: 0}
+			return &Payload{Message: "Nothing to save: no lighting ports or fans are configured on this controller", Code: http.StatusOK, Status: 0}
 		}
 	}
-	return &Payload{Message: "Unable to save lighting to the controller", Code: http.StatusOK, Status: 0}
+	return &Payload{Message: "Unable to save to the controller", Code: http.StatusOK, Status: 0}
 }
 
 // ProcessChangeStrip will process POST request from a client for RGB strip change

@@ -92,6 +92,7 @@ type Device struct {
 	TemperatureProbes       *[]TemperatureProbe
 	RailVoltages            map[int]*RailVoltage
 	activeRgb               map[int]*rgb.ActiveRGB
+	lastSpeed               map[int]byte // last duty (%) sent per fan channel, re-sent as the stored speed
 	Template                string
 	Brightness              map[int]string
 	HasLCD                  bool
@@ -496,6 +497,26 @@ func (d *Device) GetCommonRgbProfile() string {
 	return shared
 }
 
+// commitHardwareFanSpeeds leaves every fan at the speed OpenLinkHub last set, as a fixed duty
+// (the documented 0x23 command). The controller can't follow CPU/GPU-temperature curves on its
+// own (it has no probes here), so this is the closest it can hold while OpenLinkHub isn't
+// running. Whether it survives a full power-off is not documented. The caller holds deviceLock.
+func (d *Device) commitHardwareFanSpeeds() int {
+	saved := 0
+	for channel, value := range d.lastSpeed {
+		device, ok := d.Devices[channel]
+		if !ok || !device.HasSpeed {
+			continue
+		}
+		if _, err := d.transfer(cmdSetSpeed, []byte{byte(channel), value}); err != nil {
+			logger.Log(logger.Fields{"error": err, "serial": d.Serial, "channel": channel}).Warn("Unable to store fan speed on controller")
+			continue
+		}
+		saved++
+	}
+	return saved
+}
+
 // SaveHardwareLighting stores the lighting currently set on the page in the controller
 // (same as what happens on shutdown), then hands the LED ports back to software control.
 func (d *Device) SaveHardwareLighting() uint8 {
@@ -512,13 +533,18 @@ func (d *Device) SaveHardwareLighting() uint8 {
 
 	d.deviceLock.Lock()
 	saved := d.commitHardwareLighting()
+	fans := d.commitHardwareFanSpeeds()
+	speeds := make(map[int]byte, len(d.lastSpeed))
+	for channel, value := range d.lastSpeed {
+		speeds[channel] = value
+	}
 	d.deviceLock.Unlock()
 
-	logger.Log(logger.Fields{"serial": d.Serial, "ports": saved}).Info("Saved current lighting to controller")
+	logger.Log(logger.Fields{"serial": d.Serial, "ports": saved, "fans": fans, "speeds": speeds}).Info("Saved current lighting and fan speeds to controller")
 
 	d.setColorEndpoint()
 	d.setDeviceColor(true)
-	if saved == 0 {
+	if saved == 0 && fans == 0 {
 		return 2
 	}
 	return 1
@@ -562,6 +588,7 @@ func (d *Device) Stop() {
 	// fans show it at power-on until OpenLinkHub takes over again.
 	d.deviceLock.Lock()
 	d.commitHardwareLighting()
+	d.commitHardwareFanSpeeds()
 	d.deviceLock.Unlock()
 
 	d.timer.Stop()
@@ -970,6 +997,10 @@ func (d *Device) setSpeed(data map[int]byte) {
 			logger.Log(logger.Fields{"error": err, "serial": d.Serial}).Error("Unable to set device speed")
 			continue
 		}
+		if d.lastSpeed == nil {
+			d.lastSpeed = make(map[int]byte)
+		}
+		d.lastSpeed[channel] = value
 	}
 }
 
